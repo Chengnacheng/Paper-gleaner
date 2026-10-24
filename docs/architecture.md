@@ -208,13 +208,13 @@ sequenceDiagram
   U->>I: 评论 "/deep 3"
   I->>A: issue_comment 事件
   A->>A: 校验作者权限、标签、指令前缀
-  A->>I: 给评论加 👀
   A->>G: gleaner handle-comment
+  G->>I: 给评论加 👀
   G->>D: 读取该 Issue 对应的 digest，把 3 解析成 arXiv ID
   G->>G: 命中报告缓存？未命中则获取全文
   G->>L: 深读 prompt（全文 + 用户画像）
   L-->>G: 结构化报告
-  G->>I: 回复深读报告
+  G->>I: 回复深读报告，加 🚀
   G->>D: 缓存报告，记录一次隐式正反馈
 ```
 
@@ -232,7 +232,9 @@ sequenceDiagram
 | `/mute <主题>` | `/mute 医学影像` | 屏蔽某个主题，作为负向锚点 | 写画像 |
 | `/help` | | 列出指令 | — |
 
-`<ref>` 可以是当天 Issue 中的序号、arXiv ID 或 arXiv 链接。序号按「当前 Issue 对应的那一天」解析，所以在旧日报下评论同样有效。
+`<ref>` 可以是当天 Issue 中的序号、arXiv ID 或 arXiv 链接。序号按「当前 Issue 对应的那一天」解析，所以在旧日报下评论同样有效。日报推荐的论文编号 1…N，`/more` 列出的候选接着编号 N+1…，同样可以用序号引用。
+
+> 实现状态：Phase 2 实现了 `/deep`、`/compare`、`/more`、`/help`；`/like`、`/dislike`、`/mute` 在 Phase 3，`/ask` 在 Phase 4。在此之前它们按未知指令处理，回复帮助。
 
 **为什么 `/deep`、`/compare` 用流水线而 `/ask` 用 Agent**：前两者使用频率高、需要稳定的报告格式和可预期的成本，用固定步骤实现最合适；`/ask` 的问题是开放的，需要模型自己决定查什么，因此使用工具调用循环，最多 8 步并设置 token 上限。
 
@@ -262,8 +264,8 @@ Agent 没有任何写操作工具。发回复、写反馈这类副作用都由�
 
 1. 切分章节，按优先级保留：Abstract、Introduction、Method、Experiments、Conclusion 优先；References 和大部分 Appendix 跳过；
 2. 截断到 token 预算（默认约 30k）。v1 单次调用；遇到超长论文再考虑按章节 map-reduce；
-3. 代码链接：从正文正则提取 GitHub、GitLab、Hugging Face 链接，并查询 Hugging Face Papers 上关联的代码仓库；
-4. 相关工作：通过 Semantic Scholar API 获取参考文献和推荐论文，再与用户历史（推送过、点赞过的论文）做向量近邻检索。
+3. 代码链接：从正文正则提取 GitHub、GitLab、Hugging Face 链接，并查询 Hugging Face Papers 上关联的代码仓库（Phase 2 暂未接入，见 13.1）；
+4. 相关工作：通过 Semantic Scholar API 获取参考文献和推荐论文，再与用户历史（推送过、点赞过的论文）做向量近邻检索（与历史的近邻检索留到 Phase 3）。
 
 **报告模板**
 
@@ -274,7 +276,7 @@ Agent 没有任何写操作工具。发回复、写反馈这类副作用都由�
 - 代码与资源
 - 与你研究的关系（结合用户画像）
 - 局限与值得追问的点
-- 相关工作对比（表格）
+- 相关工作对比（表格）：Phase 2 中由 `/compare <ref>` 单独生成，`/deep` 报告不含这一节
 
 **缓存**：报告保存在 data 分支的 `reports/<arxiv_id>.md`，重复执行 `/deep` 直接返回缓存；`/deep 3 --force` 强制重新生成。
 
@@ -411,7 +413,8 @@ paper-gleaner/
 │   │   ├── rerank.py             # LLM 精排 + 理由
 │   │   └── overview.py           # 日报概览
 │   ├── reader/
-│   │   ├── fulltext.py           # arXiv HTML / PDF 获取与解析
+│   │   ├── fulltext.py           # arXiv HTML / PDF 获取与解析、章节切分、代码链接
+│   │   ├── prompt.py             # 深读、对比共用的 prompt 片段（不可信内容的包裹）
 │   │   ├── deep_read.py
 │   │   └── compare.py
 │   ├── agent/
@@ -429,7 +432,8 @@ paper-gleaner/
 │   ├── store/
 │   │   └── data_branch.py        # 以 git worktree 检出、提交、推送 gleaner-data 分支
 │   └── render/
-│       └── markdown.py           # 日报 / 深读 / 对比的 Markdown 渲染与转义
+│       ├── markdown.py           # 日报的 Markdown 渲染、转义、超长评论拆分
+│       └── replies.py            # 指令回复（深读 / 对比 / 更多候选 / 帮助）的渲染
 ├── integrations/mcp_server/
 │   └── server.py                 # MCP Server（stdio）
 ├── profile/
@@ -506,6 +510,7 @@ ranking:
 deep_read:
   auto_top_m: 1                    # 日报中自动深读的篇数，0 表示关闭
   max_input_tokens: 30000
+  timeout_seconds: 180             # 深读、对比单次 LLM 调用的超时
 
 llm:
   base_url: https://api.deepseek.com
@@ -594,7 +599,8 @@ jobs:
 - **只响应仓库所有者和协作者**：公开仓库任何人都能评论，不加限制会被他人消耗你的 API 额度；
 - **不会自我循环**：使用 `GITHUB_TOKEN` 发出的评论不会再次触发 workflow；
 - **不使用 `concurrency` 分组**：GitHub 的并发组只保留一个排队中的任务，用户连续发几条指令时中间的会被取消。交互任务写入的都是只追加的数据，靠 rebase 重试加 `merge=union` 就能处理并发；
-- 收到指令后先给评论加 👀，完成后加 🚀；出错时回复简短的错误信息和 `/help` 提示。
+- 收到指令后先给评论加 👀，完成后加 🚀；出错时回复简短的错误信息和 `/help` 提示，并加 😕；
+- 评论内容只由 `gleaner handle-comment` 从事件文件（`GITHUB_EVENT_PATH`）读取，不拼进 `run` 脚本，避免脚本注入。
 
 ### 8.3 `weekly.yml`
 
@@ -677,12 +683,34 @@ GitHub Actions：公开仓库使用标准 runner 免费；私有仓库每次运�
 | --- | --- | --- |
 | **Phase 0 骨架** ✅ 已完成 | pyproject 与 uv、配置加载与校验、LLM 客户端（重试与用量统计）、arXiv RSS 抓取、CLI 骨架（`check`、`daily --dry-run`）、`ci.yml` | `gleaner daily --dry-run` 能把抓到的论文打印到终端 |
 | **Phase 1 MVP 日报** ✅ 已完成 | 去重与关键词过滤；兴趣锚点拆解；本地嵌入粗筛；LLM 精排与相关理由；Issue 发布（每篇一条评论）；data 分支存储；`daily.yml` | fork 后配置 Secret 和兴趣描述，手动触发即可收到日报 Issue |
-| **Phase 2 交互与深读**（约 1 周） | `interact.yml` 与指令解析；`/deep`（HTML/PDF 获取、代码链接、报告缓存）；`/compare`（多篇对比、单篇与相关工作对比）；`/more`、`/help` | 在日报 Issue 下评论 `/deep 1`，3 分钟内收到报告 |
+| **Phase 2 交互与深读** ✅ 已实现 | `interact.yml` 与指令解析；`/deep`（HTML/PDF 获取、代码链接、报告缓存）；`/compare`（多篇对比、单篇与相关工作对比）；`/more`、`/help` | 在日报 Issue 下评论 `/deep 1`，3 分钟内收到报告 |
 | **Phase 3 反馈记忆**（约 1 周） | reaction 同步；`/like`、`/dislike`、`/mute`；反馈锚点参与粗筛；`weekly.yml` 偏好总结 | 连续反馈一周后，`learned_preferences.md` 内容合理，推荐结果有可观察的变化 |
 | **Phase 4 多渠道与生态**（约 1 周） | 邮件、飞书、企业微信；`/ask` Agent；MCP Server；Claude Code Skill；Zotero 可选输入 | 各渠道都能收到推送；在 Claude Code 中可以查询当天推送 |
 | **Phase 5 打磨与传播** | 缺少配置时自动创建引导 Issue；完善 README 和截图；建立 Demo 仓库；用一小份人工标注集评估精排 precision@10，据此调整权重和 prompt | 新用户按 README 能在 10 分钟内跑通 |
 
 Phase 1 完成后项目就已经比现有方案好用（可解释的推荐 + 不依赖 Zotero）；Phase 2 带来最主要的差异化（交互式深读）。
+
+### 13.1 Phase 2 实现说明
+
+与上文设计不同或做了取舍的地方：
+
+| 项目 | 实现 |
+| --- | --- |
+| `/deep` 报告 | 七个部分：一句话总结、问题与动机、方法要点、实验、代码与资源、与你研究的关系、局限与可追问点。「相关工作对比」由 `/compare <ref>` 单独生成，`/deep` 不调用 Semantic Scholar |
+| 输出格式 | deep 档模型直接输出 Markdown（按固定的小标题），不用 JSON mode：推理模型往往不支持 |
+| 报告缓存 | `reports/<arxiv_id>.md` 开头是 YAML 元数据（模型、全文来源、生成时间），后面是报告正文；文件格式被改坏时忽略缓存重新生成。`/deep` 不论是否命中缓存都记一次隐式反馈 |
+| 全文与截断 | HTML（LaTeXML）按一级章节切分，公式换成 LaTeX 源码，表格保留成行；PDF 按「1 Introduction」「II. METHOD」这类编号标题切分。Abstract、Introduction、Method、Experiments、Conclusion 优先，同一优先级放不下时各章节分摊预算、保留开头；References、致谢跳过，附录只保留实现细节、补充实验这类章节且优先级最低 |
+| token 预算 | 没有分词器，按字符数估算：英文约 3.5 个字符一个 token（偏保守），中日韩字符每字 1 个 token。单条指令的全部输入不超过 `deep_read.max_input_tokens`，多篇对比时各篇平分 |
+| LLM 超时 | 新增 `deep_read.timeout_seconds`（默认 180 秒），覆盖 `llm.timeout_seconds`：几万 token 的输入经常超过 60 秒 |
+| 代码链接 | 只从正文提取（HTML 链接、PDF 链接注释、正文中的 URL），参考文献中的链接不算；Hugging Face Papers 接口的真实响应格式还没有确认，暂未接入 |
+| 相关工作 | Semantic Scholar 参考文献（有影响力的、被引多的优先）取 6 篇、推荐论文取 4 篇；与用户历史的向量近邻检索留到 Phase 3。没有 `S2_API_KEY` 时容易被限流，只重试一次，失败就在回复中注明，并让模型依据论文自己的相关工作章节比较 |
+| `/compare` | 最多 5 篇；同一篇写了两次按单篇处理。结果不缓存 |
+| `<ref>` | 只支持新式 arXiv ID（`2410.12345`）；版本号被忽略，总是读取最新版本。不在当天日报中的 ID 通过 arXiv API 补全元数据，API 不可用时从 HTML 全文中取标题和摘要 |
+| 表情 | 👀 和 🚀 由 `gleaner handle-comment` 添加（而不是 workflow 的单独步骤）；出错时加 😕 |
+| 回复 | 超过约 60000 字符时拆成多条评论，断在空行处，必要时闭合再重新打开代码块和 `<details>`；外部文本一律转义，模型输出保留 `>` 引用块但转义 `<` |
+| 反馈 | `/deep`、`/compare` 作为 +0.5 的隐式反馈写入 `feedback/<YYYY-MM>.jsonl`，Phase 3 再读取 |
+| 自动深读 | `deep_read.auto_top_m` 还没有接入日报 |
+| 失败降级 | arXiv、Semantic Scholar、LLM 失败都不让指令崩溃：LLM 失败时回复摘要和代码链接；全文获取失败时基于摘要分析并注明；只有序号越界、参数写错等用户能修正的问题才回复错误原因 |
 
 ---
 
