@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -64,3 +65,14 @@ class Digest(BaseModel):
     issue_number: int | None = None
     issue_url: str | None = None
     comment_ids: dict[str, int] = Field(default_factory=dict)  # 论文 ID → 评论 ID
+
+
+class DeepReport(BaseModel):
+    """/deep 生成的深读报告，缓存在 gleaner-data 分支的 reports/<arxiv_id>.md。"""
+
+    paper_id: str
+    title: str
+    model: str
+    source: Literal["html", "pdf", "abstract"]  # 全文来源；abstract 表示只用了摘要
+    generated_at: datetime
+    body: str  # 模型输出的 Markdown，未转义；发到 GitHub 前再转义

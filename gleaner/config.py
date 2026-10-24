@@ -96,6 +96,8 @@ class RankingConfig(_Section):
 class DeepReadConfig(_Section):
     auto_top_m: int = Field(1, ge=0)
     max_input_tokens: int = Field(30_000, ge=1_000)
+    # 深读、对比单次 LLM 调用的超时：输入长达几万 token，推理模型往往要一两分钟
+    timeout_seconds: float = Field(180, gt=0)
 
 
 class LLMModels(_Section):

@@ -110,8 +110,12 @@ class LLMClient:
         json_mode: bool = False,
         max_tokens: int | None = None,
         temperature: float | None = None,
+        timeout: float | None = None,
     ) -> str:
-        """发送一次对话请求，返回模型输出的文本。"""
+        """发送一次对话请求，返回模型输出的文本。
+
+        timeout 覆盖配置中的 llm.timeout_seconds，用于深读这类输入长、输出慢的请求。
+        """
         self.tracker.ensure_within_budget()
         model = self.model_for(tier)
 
@@ -122,6 +126,8 @@ class LLMClient:
             kwargs["max_tokens"] = max_tokens
         if temperature is not None:
             kwargs["temperature"] = temperature
+        if timeout is not None:
+            kwargs["timeout"] = timeout
 
         try:
             response = self._client.chat.completions.create(

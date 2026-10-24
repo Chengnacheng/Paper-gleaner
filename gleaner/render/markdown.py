@@ -103,6 +103,14 @@ def sanitize(text: str) -> str:
     return re.sub(r"#(?=\d)", "#" + _ZERO_WIDTH_SPACE, text)
 
 
+def sanitize_markdown(text: str) -> str:
+    """转义模型生成的 Markdown：与 sanitize 相同，但保留 ">"，引用块才能正常显示。
+
+    只要 "<" 被转义，就不会出现 HTML 标签或伪造的 gleaner 标记注释。
+    """
+    return sanitize(text).replace("&gt;", ">")
+
+
 def _cell(text: str) -> str:
     return " ".join(sanitize(text).split()).replace("|", "\\|")
 
