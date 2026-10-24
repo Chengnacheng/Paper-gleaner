@@ -554,7 +554,7 @@ on:
     - cron: "30 3 * * 1-5"   # 北京时间 11:30（兜底）
   workflow_dispatch:
     inputs:
-      dry_run: {type: boolean, default: false}   # 只运行不发布
+      dry_run: {type: boolean, default: false}   # 只运行不发布；没有新公告时改用最近 20 篇论文
       force: {type: boolean, default: false}     # 当天日报已存在时仍重新生成
 
 permissions:

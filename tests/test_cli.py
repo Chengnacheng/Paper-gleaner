@@ -183,13 +183,35 @@ def test_daily_requires_interests(repo: Path) -> None:
 
 
 @respx.mock
-def test_daily_without_announcements(repo: Path, empty_rss_bytes: bytes) -> None:
+def test_daily_without_announcements(
+    repo: Path, empty_rss_bytes: bytes, git_remote: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    github_env(monkeypatch)
+    respx.get(f"{API}/issues").mock(return_value=httpx.Response(200, json=[]))
     respx.get(RSS_URL).mock(return_value=httpx.Response(200, content=empty_rss_bytes))
+
+    result = runner.invoke(app, ["daily"])
+
+    assert result.exit_code == 0, result.output
+    assert "今天没有新公告" in result.output
+    assert not data_branch_exists(git_remote)
+
+
+@respx.mock
+def test_dry_run_without_announcements_uses_recent_papers(
+    repo: Path, empty_rss_bytes: bytes, api_bytes: bytes
+) -> None:
+    respx.get(RSS_URL).mock(return_value=httpx.Response(200, content=empty_rss_bytes))
+    api = respx.get("https://export.arxiv.org/api/query").mock(
+        return_value=httpx.Response(200, content=api_bytes)
+    )
 
     result = runner.invoke(app, ["daily", "--dry-run"])
 
     assert result.exit_code == 0, result.output
-    assert "今天没有新公告" in result.output
+    assert "改用最近提交的 2 篇论文试运行" in result.output
+    assert "[1] 9/10  2610.00001  LongKV" in result.output
+    assert api.calls.last.request.url.params["max_results"] == "20"
 
 
 @respx.mock

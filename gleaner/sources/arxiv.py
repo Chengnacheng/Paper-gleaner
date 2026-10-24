@@ -2,12 +2,13 @@
 
 arXiv 的 RSS（rss.arxiv.org）每个公告日更新一次，条目里已包含标题、摘要、作者、
 分类和公告类型（new / cross / replace / replace-cross），日报所需的元数据都在其中。
-周末和节假日没有公告时，RSS 不含任何条目。
+周末和节假日没有公告时，RSS 不含任何条目；这时试运行改用 arXiv API 取最近提交的论文。
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from time import struct_time
 from typing import Any
@@ -21,6 +22,7 @@ from gleaner.models import Paper
 from gleaner.sources.base import SourceError
 
 RSS_URL = "https://rss.arxiv.org/rss/{categories}"
+API_URL = "https://export.arxiv.org/api/query"
 USER_AGENT = f"paper-gleaner/{__version__} (+https://github.com/stanGSA/Paper-gleaner)"
 
 _ID_RE = re.compile(r"(\d{4}\.\d{4,5})(?:v\d+)?")
@@ -51,13 +53,23 @@ class ArxivSource:
         return RSS_URL.format(categories="+".join(self.config.categories))
 
     def fetch_latest(self) -> list[Paper]:
-        papers = parse_rss(self._download(self.feed_url))
+        papers = parse_rss(self._download(self.feed_url, what="arXiv RSS"))
         return [paper for paper in papers if self._wanted(paper)]
 
-    def _download(self, url: str) -> bytes:
+    def fetch_recent(self, limit: int) -> list[Paper]:
+        """所关注分类中最近提交的 limit 篇论文，不区分公告日。"""
+        params = {
+            "search_query": " OR ".join(f"cat:{c}" for c in self.config.categories),
+            "sortBy": "submittedDate",
+            "sortOrder": "descending",
+            "max_results": limit,
+        }
+        return parse_api(self._download(API_URL, what="arXiv API", params=params))
+
+    def _download(self, url: str, *, what: str, params: dict[str, Any] | None = None) -> bytes:
         try:
             if self._client is not None:
-                response = self._client.get(url)
+                response = self._client.get(url, params=params)
             else:
                 with httpx.Client(
                     headers={"User-Agent": USER_AGENT},
@@ -65,10 +77,10 @@ class ArxivSource:
                     follow_redirects=True,
                     transport=httpx.HTTPTransport(retries=3),
                 ) as client:
-                    response = client.get(url)
+                    response = client.get(url, params=params)
             response.raise_for_status()
         except httpx.HTTPError as e:
-            raise SourceError(f"抓取 arXiv RSS 失败：{e}") from e
+            raise SourceError(f"抓取 {what} 失败：{e}") from e
         return response.content
 
     def _wanted(self, paper: Paper) -> bool:
@@ -81,20 +93,46 @@ class ArxivSource:
 
 def parse_rss(content: bytes) -> list[Paper]:
     """解析 arXiv RSS，按出现顺序返回去重后的论文。"""
+    return _unique(_parse_rss_entry(entry) for entry in _parse_feed(content, "arXiv RSS"))
+
+
+def parse_api(content: bytes) -> list[Paper]:
+    """解析 arXiv API 返回的 Atom，按出现顺序返回去重后的论文。"""
+    return _unique(_parse_api_entry(entry) for entry in _parse_feed(content, "arXiv API 响应"))
+
+
+def _parse_feed(content: bytes, what: str) -> list[Any]:
     feed = feedparser.parse(content)
-    # 维护页等非 RSS 内容不能当作"今天没有公告"
+    # 维护页等非 feed 内容不能当作"没有论文"
     if not feed.entries and (feed.bozo or not feed.version):
-        raise SourceError(f"无法解析 arXiv RSS：{feed.get('bozo_exception') or '不是 RSS 内容'}")
-
-    papers: dict[str, Paper] = {}
-    for entry in feed.entries:
-        paper = _parse_entry(entry)
-        if paper is not None and paper.id not in papers:
-            papers[paper.id] = paper
-    return list(papers.values())
+        raise SourceError(f"无法解析 {what}：{feed.get('bozo_exception') or '不是 feed 内容'}")
+    return feed.entries
 
 
-def _parse_entry(entry: Any) -> Paper | None:
+def _unique(papers: Iterable[Paper | None]) -> list[Paper]:
+    result: dict[str, Paper] = {}
+    for paper in papers:
+        if paper is not None and paper.id not in result:
+            result[paper.id] = paper
+    return list(result.values())
+
+
+def _parse_api_entry(entry: Any) -> Paper | None:
+    # 出错时 API 返回一条 id 不是论文链接的条目，这里会被跳过
+    match = _ID_RE.search(entry.get("id", ""))
+    if match is None:
+        return None
+    return Paper(
+        id=match.group(1),
+        title=_squash(entry.get("title", "")),
+        abstract=_squash(entry.get("summary", "")),
+        authors=[_squash(a["name"]) for a in entry.get("authors", []) if a.get("name")],
+        categories=[tag["term"] for tag in entry.get("tags", []) if tag.get("term")],
+        announced=_to_datetime(entry.get("published_parsed")),
+    )
+
+
+def _parse_rss_entry(entry: Any) -> Paper | None:
     match = _ID_RE.search(entry.get("link", "")) or _ID_RE.search(entry.get("id", ""))
     if match is None:
         return None

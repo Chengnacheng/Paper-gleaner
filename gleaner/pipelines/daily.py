@@ -48,6 +48,7 @@ class DailyResult:
     status: Status
     digest: Digest | None = None
     existing: IssueRef | None = None
+    sampled: bool = False  # 没有新公告，改用了最近提交的论文
 
 
 def digest_path(day: date) -> str:
@@ -64,8 +65,14 @@ def run_daily(
     source: Source | None = None,
     publisher: Publisher | None = None,
     force: bool = False,
+    sample_size: int | None = None,
     now: datetime | None = None,
 ) -> DailyResult:
+    """运行一次日报流水线。
+
+    sample_size：没有新公告时，改用最近提交的这么多篇论文（不去重、不记录为已处理）。
+    只在没有发布渠道时生效，用于周末等时候试运行、检查配置。
+    """
     started = time.monotonic()
     now = now or datetime.now(UTC)
     # 先读兴趣描述：没配置好就立刻失败，不白跑抓取
@@ -75,13 +82,18 @@ def run_daily(
     if existing is not None:
         return _repair(store, publisher, existing, today)
 
-    papers = (source or ArxivSource(config.sources.arxiv)).fetch_latest()
+    source = source or ArxivSource(config.sources.arxiv)
+    papers = source.fetch_latest()
+    sampled = not papers and bool(sample_size) and publisher is None
+    if sampled and sample_size:
+        papers = source.fetch_recent(sample_size)
     if not papers:
         return DailyResult("no_announcements")
 
-    seen = load_seen(store, today)
+    seen = set() if sampled else load_seen(store, today)
     filtered = apply_filters(papers, seen=seen, config=config.filters)
-    record_seen(store, [p for p in papers if p.id not in seen], today)
+    if not sampled:
+        record_seen(store, [p for p in papers if p.id not in seen], today)
 
     anchors = get_anchors(store, interests, llm)
     ranking = config.ranking
@@ -148,7 +160,7 @@ def run_daily(
             }
         ],
     )
-    return DailyResult(status, digest)
+    return DailyResult(status, digest, sampled=sampled)
 
 
 def _repair(store: DataStore, publisher: Publisher, existing: IssueRef, today: date) -> DailyResult:

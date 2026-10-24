@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "只运行不发布（不创建 Issue、不提交数据分支）"
+        description: "只运行不发布（不创建 Issue、不提交数据分支；周末没有新公告时改用最近 20 篇论文）"
         type: boolean
         default: false
       force:

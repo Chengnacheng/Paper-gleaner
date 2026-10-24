@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from gleaner.config import Config
+from gleaner.filters import record_seen
 from gleaner.models import Digest, Paper
 from gleaner.notify import IssueRef
 from gleaner.pipelines.daily import digest_path, run_daily
@@ -19,13 +20,19 @@ SCORES = {"2610.00001": 9, "2610.00002": 7, "2610.00003": 4}
 class FakeSource:
     name = "fake"
 
-    def __init__(self, papers: list[Paper]) -> None:
+    def __init__(self, papers: list[Paper], recent: list[Paper] | None = None) -> None:
         self.papers = papers
+        self.recent = recent or []
         self.calls = 0
+        self.recent_limits: list[int] = []
 
     def fetch_latest(self) -> list[Paper]:
         self.calls += 1
         return self.papers
+
+    def fetch_recent(self, limit: int) -> list[Paper]:
+        self.recent_limits.append(limit)
+        return self.recent[:limit]
 
 
 class FakePublisher:
@@ -67,7 +74,7 @@ def papers(rss_bytes: bytes) -> list[Paper]:
 
 def run(config: Config, store: DataStore, papers: list[Paper], scores=SCORES, **kwargs):
     llm, fake = fake_llm(pipeline_llm(scores))
-    source = FakeSource(papers)
+    source = FakeSource(papers, recent=kwargs.pop("recent", None))
     result = run_daily(
         config,
         store=store,
@@ -233,3 +240,32 @@ def test_missing_interests_fails_before_fetching(papers: list[Paper], tmp_path: 
     config = Config.model_validate({"profile": {"interests_file": str(tmp_path / "nope.md")}})
     with pytest.raises(ProfileError):
         run(config, DataStore(tmp_path), papers)
+
+
+def test_dry_run_samples_recent_papers_without_announcements(
+    config: Config, papers: list[Paper], tmp_path: Path
+) -> None:
+    store = DataStore(tmp_path)
+    record_seen(store, papers, date(2026, 10, 23))  # 最近的论文都处理过，也照样参与试运行
+
+    result, fake, source = run(config, store, [], recent=papers, sample_size=20)
+
+    assert result.status == "preview"
+    assert result.sampled is True
+    assert source.recent_limits == [20]
+    assert [p.id for p in result.digest.papers] == ["2610.00001", "2610.00002"]
+    assert result.digest.stats.duplicates == 0
+    assert len(fake.requests) == 3
+    # 抽样的论文不记为已处理，不影响之后的去重
+    assert store.read_jsonl("history/seen/2026-10.jsonl") == [
+        {"id": p.id, "date": "2026-10-23"} for p in papers
+    ]
+
+
+def test_no_sampling_when_publishing(config: Config, papers: list[Paper], tmp_path: Path) -> None:
+    result, _, source = run(
+        config, DataStore(tmp_path), [], recent=papers, sample_size=20, publisher=FakePublisher()
+    )
+
+    assert result.status == "no_announcements"
+    assert source.recent_limits == []

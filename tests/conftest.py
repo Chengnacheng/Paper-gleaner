@@ -26,6 +26,11 @@ def empty_rss_bytes() -> bytes:
     return (FIXTURES / "arxiv_rss_empty.xml").read_bytes()
 
 
+@pytest.fixture
+def api_bytes() -> bytes:
+    return (FIXTURES / "arxiv_api.xml").read_bytes()
+
+
 def git(*args: str, cwd: Path) -> str:
     # git 输出 UTF-8；不指定编码时 Windows 会按系统默认编码（如 GBK）解码而出错
     result = subprocess.run(

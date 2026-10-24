@@ -6,7 +6,7 @@ import respx
 
 from gleaner.config import ArxivConfig
 from gleaner.sources import ArxivSource, SourceError
-from gleaner.sources.arxiv import parse_rss
+from gleaner.sources.arxiv import parse_api, parse_rss
 
 FEED_URL = "https://rss.arxiv.org/rss/cs.CL+cs.LG"
 
@@ -99,3 +99,49 @@ def test_fetch_latest_sends_user_agent(rss_bytes: bytes) -> None:
     ArxivSource(ArxivConfig(categories=["cs.CL", "cs.LG"])).fetch_latest()
 
     assert route.calls.last.request.headers["User-Agent"].startswith("paper-gleaner/")
+
+
+API_URL = "https://export.arxiv.org/api/query"
+
+
+def test_parse_api(api_bytes: bytes) -> None:
+    papers = parse_api(api_bytes)
+
+    assert [p.id for p in papers] == ["2610.00001", "2610.00002"]
+    first = papers[0]
+    assert first.title == "LongKV: Hierarchical KV Cache Compression for Million-Token Inference"
+    assert first.abstract == (
+        "We propose a hierarchical KV cache compression scheme "
+        "that keeps perplexity nearly unchanged."
+    )
+    assert first.authors == ["Alice Zhang", "Bob Li"]
+    assert first.categories == ["cs.CL", "cs.LG"]
+    assert first.announce_type is None
+    assert first.announced == datetime(2026, 10, 23, 17, 59, 59, tzinfo=UTC)
+
+
+def test_parse_api_garbage_raises() -> None:
+    with pytest.raises(SourceError, match="arXiv API"):
+        parse_api(b"<html><body>Rate exceeded</body></html>")
+
+
+@respx.mock
+def test_fetch_recent(api_bytes: bytes) -> None:
+    route = respx.get(API_URL).mock(return_value=httpx.Response(200, content=api_bytes))
+    source = ArxivSource(ArxivConfig(categories=["cs.CL", "cs.LG"]))
+
+    papers = source.fetch_recent(20)
+
+    assert len(papers) == 2
+    params = route.calls.last.request.url.params
+    assert params["search_query"] == "cat:cs.CL OR cat:cs.LG"
+    assert params["sortBy"] == "submittedDate"
+    assert params["sortOrder"] == "descending"
+    assert params["max_results"] == "20"
+
+
+@respx.mock
+def test_fetch_recent_http_error() -> None:
+    respx.get(API_URL).mock(return_value=httpx.Response(503))
+    with pytest.raises(SourceError, match="抓取 arXiv API 失败"):
+        ArxivSource(ArxivConfig()).fetch_recent(20)

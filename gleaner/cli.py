@@ -39,6 +39,8 @@ app = typer.Typer(
 )
 
 DEFAULT_DATA_DIR = Path(".gleaner-data")
+# 试运行时如果没有新公告（周末、节假日），改用最近提交的这么多篇论文
+DRY_RUN_SAMPLE_SIZE = 20
 
 ConfigOption = Annotated[
     Path | None,
@@ -162,8 +164,9 @@ def daily(
             today=today,
             publisher=publisher,
             force=force,
+            sample_size=DRY_RUN_SAMPLE_SIZE if dry_run else None,
         )
-        if not dry_run and result.status != "already_published":
+        if not dry_run and result.status not in {"already_published", "no_announcements"}:
             branch.commit_and_push(f"data: daily digest {today.isoformat()}")
     except _DAILY_ERRORS as e:
         typer.echo(f"✗ {e}", err=True)
@@ -233,6 +236,9 @@ def _report(result: DailyResult, missing: int = 0) -> str:
     digest = result.digest
     assert digest is not None
     lines = []
+    if result.sampled:
+        count = digest.stats.fetched
+        lines.append(f"今天没有新公告，改用最近提交的 {count} 篇论文试运行（只用于检查配置）。")
     if result.status == "published":
         lines.append(f"✓ 已发布：{digest.issue_url}")
         if warning:
