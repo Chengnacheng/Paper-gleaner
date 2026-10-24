@@ -169,8 +169,12 @@ def daily(
         typer.echo(f"✗ {e}", err=True)
         raise typer.Exit(1) from e
 
-    report = _report(result)
+    missing = _missing_comments(result, config)
+    report = _report(result, missing)
     typer.echo(report)
+    if missing and os.environ.get("GITHUB_ACTIONS") == "true":
+        # 在 Actions 运行页面显示为黄色警告
+        typer.echo(f"::warning::{missing} 篇论文的评论没有发出去，{_REPAIR_HINT}")
     if summary_file := os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(summary_file, "a", encoding="utf-8") as f:
             f.write(f"## Paper Gleaner · {today.isoformat()}\n\n{report}\n")
@@ -202,10 +206,27 @@ def _build_publisher(config: Config) -> IssuePublisher | None:
     return IssuePublisher(github, config.notify.github_issue)
 
 
-def _report(result: DailyResult) -> str:
+_REPAIR_HINT = "不加 --force 重新运行（或等 11:30 的兜底运行）会自动补发"
+
+
+def _missing_comments(result: DailyResult, config: Config) -> int:
+    """已发布但评论没发出去的论文数。"""
+    digest = result.digest
+    if digest is None or digest.issue_number is None:
+        return 0
+    if not config.notify.github_issue.per_paper_comment:
+        return 0
+    return sum(1 for paper in digest.papers if paper.id not in digest.comment_ids)
+
+
+def _report(result: DailyResult, missing: int = 0) -> str:
+    warning = f"! 还有 {missing} 篇论文的评论没有发出去，{_REPAIR_HINT}。" if missing else ""
+    url = result.existing.url if result.existing else ""
     if result.status == "already_published":
-        url = result.existing.url if result.existing else ""
-        return f"今天的日报已经发布：{url}\n如需重新生成，请加 --force。"
+        lines = [f"今天的日报已经发布：{url}", warning, "如需重新生成，请加 --force。"]
+        return "\n".join(line for line in lines if line)
+    if result.status == "repaired":
+        return "\n".join(line for line in [f"✓ 已补发缺失的论文评论：{url}", warning] if line)
     if result.status == "no_announcements":
         return "今天没有新公告（arXiv 周末和节假日不更新）。"
 
@@ -214,6 +235,8 @@ def _report(result: DailyResult) -> str:
     lines = []
     if result.status == "published":
         lines.append(f"✓ 已发布：{digest.issue_url}")
+        if warning:
+            lines.append(warning)
     elif result.status == "nothing_relevant":
         lines.append("今天没有达到 min_score 的论文，未发布日报。")
     if digest.stats.degraded:

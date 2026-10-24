@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Literal, Protocol
 
+from pydantic import ValidationError
+
 from gleaner.config import Config
 from gleaner.filters import apply_filters, load_seen, record_seen
 from gleaner.llm import LLMClient
@@ -25,6 +27,7 @@ Status = Literal[
     "published",  # 已发布 Issue
     "preview",  # 没有发布渠道（dry-run），只生成了日报
     "already_published",  # 当天的 Issue 已存在，跳过
+    "repaired",  # 当天的 Issue 已存在，补发了上次没发出去的评论
     "no_announcements",  # arXiv 今天没有公告
     "nothing_relevant",  # 没有达到 min_score 的论文，不发布
 ]
@@ -34,6 +37,8 @@ class Publisher(Protocol):
     def find_existing(self, day: date) -> IssueRef | None: ...
 
     def publish(self, digest: Digest) -> Digest: ...
+
+    def repair(self, digest: Digest) -> Digest: ...
 
     def close_stale(self, now: datetime | None = None) -> list[int]: ...
 
@@ -68,7 +73,7 @@ def run_daily(
 
     existing = None if publisher is None or force else publisher.find_existing(today)
     if existing is not None:
-        return DailyResult("already_published", existing=existing)
+        return _repair(store, publisher, existing, today)
 
     papers = (source or ArxivSource(config.sources.arxiv)).fetch_latest()
     if not papers:
@@ -144,3 +149,19 @@ def run_daily(
         ],
     )
     return DailyResult(status, digest)
+
+
+def _repair(store: DataStore, publisher: Publisher, existing: IssueRef, today: date) -> DailyResult:
+    """当天日报已发布：如果上次有论文评论没发出去，按保存的 digest 补发。"""
+    try:
+        saved = store.read_model(digest_path(today), Digest)
+    except ValidationError:
+        saved = None
+    if saved is None or saved.issue_number != existing.number:
+        return DailyResult("already_published", existing=existing)
+
+    repaired = publisher.repair(saved)
+    if repaired.comment_ids == saved.comment_ids:
+        return DailyResult("already_published", saved, existing)
+    store.write_model(digest_path(today), repaired)
+    return DailyResult("repaired", repaired, existing)

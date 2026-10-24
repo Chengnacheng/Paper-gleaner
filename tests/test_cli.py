@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -9,8 +9,11 @@ import respx
 from typer.testing import CliRunner
 
 from gleaner import __version__, cli
-from gleaner.cli import app
+from gleaner.cli import _report, app
 from gleaner.llm import LLMClient
+from gleaner.models import Digest, ScoredPaper
+from gleaner.notify import IssueRef
+from gleaner.pipelines.daily import DailyResult
 from tests.conftest import (
     PIPELINE_VOCABULARY,
     FakeOpenAI,
@@ -233,3 +236,20 @@ def test_falls_back_to_example_config(tmp_path: Path, monkeypatch: pytest.Monkey
     result = runner.invoke(app, ["check"])
 
     assert "暂用 config.example.yaml" in result.output
+
+
+def test_report_warns_about_missing_comments() -> None:
+    digest = Digest(
+        day=date(2026, 10, 26),
+        generated_at=datetime.now(ZoneInfo("UTC")),
+        papers=[ScoredPaper(id="2610.00001", title="P", abstract="A", llm_score=8)],
+        issue_number=5,
+        issue_url="https://github.com/o/r/issues/5",
+    )
+    published = _report(DailyResult("published", digest), missing=1)
+    assert "✓ 已发布：https://github.com/o/r/issues/5" in published
+    assert "还有 1 篇论文的评论没有发出去" in published
+
+    existing = IssueRef(5, "https://github.com/o/r/issues/5")
+    repaired = _report(DailyResult("repaired", digest, existing))
+    assert repaired == "✓ 已补发缺失的论文评论：https://github.com/o/r/issues/5"

@@ -32,6 +32,7 @@ class FakePublisher:
     def __init__(self, existing: IssueRef | None = None) -> None:
         self.existing = existing
         self.published: list[Digest] = []
+        self.repaired: list[Digest] = []
         self.closed = 0
 
     def find_existing(self, day: date) -> IssueRef | None:
@@ -40,6 +41,11 @@ class FakePublisher:
     def publish(self, digest: Digest) -> Digest:
         self.published.append(digest)
         return digest.model_copy(update={"issue_number": 7, "issue_url": "https://x/7"})
+
+    def repair(self, digest: Digest) -> Digest:
+        self.repaired.append(digest)
+        ids = {p.id: 900 + i for i, p in enumerate(digest.papers)} | digest.comment_ids
+        return digest.model_copy(update={"comment_ids": ids})
 
     def close_stale(self, now: datetime | None = None) -> list[int]:
         self.closed += 1
@@ -128,6 +134,54 @@ def test_skips_when_already_published(config: Config, papers: list[Paper], tmp_p
     assert source.calls == 0
     assert fake.requests == []
     assert not (tmp_path / "data").exists()
+
+
+def test_rerun_repairs_missing_comments(
+    config: Config, papers: list[Paper], tmp_path: Path
+) -> None:
+    store = DataStore(tmp_path / "data")
+    first, _, _ = run(config, store, papers, publisher=FakePublisher())
+    saved = first.digest.model_copy(update={"comment_ids": {"2610.00001": 11}})
+    store.write_model(digest_path(TODAY), saved)
+    publisher = FakePublisher(IssueRef(7, "https://x/7"))
+
+    result, fake, source = run(config, store, papers, publisher=publisher)
+
+    assert result.status == "repaired"
+    assert publisher.repaired == [saved]
+    assert source.calls == 0
+    assert fake.requests == []
+    assert store.read_model(digest_path(TODAY), Digest).comment_ids == {
+        "2610.00001": 11,
+        "2610.00002": 901,
+    }
+
+
+def test_rerun_without_missing_comments(
+    config: Config, papers: list[Paper], tmp_path: Path
+) -> None:
+    store = DataStore(tmp_path / "data")
+    first, _, _ = run(config, store, papers, publisher=FakePublisher())
+    complete = first.digest.model_copy(update={"comment_ids": {"2610.00001": 11, "2610.00002": 12}})
+    store.write_model(digest_path(TODAY), complete)
+
+    result, _, _ = run(config, store, papers, publisher=FakePublisher(IssueRef(7, "https://x/7")))
+
+    assert result.status == "already_published"
+    assert result.digest == complete
+
+
+def test_rerun_ignores_digest_of_another_issue(
+    config: Config, papers: list[Paper], tmp_path: Path
+) -> None:
+    store = DataStore(tmp_path / "data")
+    run(config, store, papers, publisher=FakePublisher())  # 保存的 digest 对应 Issue #7
+    publisher = FakePublisher(IssueRef(8, "https://x/8"))
+
+    result, _, _ = run(config, store, papers, publisher=publisher)
+
+    assert result.status == "already_published"
+    assert publisher.repaired == []
 
 
 def test_force_republishes(config: Config, papers: list[Paper], tmp_path: Path) -> None:
