@@ -240,7 +240,7 @@ def test_check_reports_missing_items(workdir: Path) -> None:
 
 def test_check_passes_when_complete(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (workdir / "profile").mkdir()
-    (workdir / "profile" / "interests.md").write_text("长上下文推理")
+    (workdir / "profile" / "interests.md").write_text("长上下文推理", encoding="utf-8")
     monkeypatch.setenv("LLM_API_KEY", "sk-test")
 
     result = runner.invoke(app, ["check"])
