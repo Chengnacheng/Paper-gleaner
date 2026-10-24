@@ -6,6 +6,8 @@ build/
 dist/
 
 # 环境与工具
+# gleaner-data 分支的本地 worktree
+.gleaner-data/
 .venv/
 .env
 .pytest_cache/
