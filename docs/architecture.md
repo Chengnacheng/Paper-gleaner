@@ -326,9 +326,10 @@ gleaner-data/
 ├── feedback/
 │   └── 2026-10.jsonl             # 按月分片，只追加
 ├── history/
-│   ├── seen.jsonl                # 已处理的 arXiv ID，用于去重
+│   ├── seen/
+│   │   └── 2026-10.jsonl         # 已处理的 arXiv ID，按月分片，去重时读取最近 3 个月
 │   └── digests/
-│       └── 2026-10-24.json       # 当日 Top K 候选、分数、理由、Issue 与评论 ID 映射
+│       └── 2026-10-24.json       # 当日推送的论文和其余候选（含分数、理由）、Issue 与评论 ID
 ├── reports/
 │   └── 2410.12345.md             # 深读报告缓存
 └── stats/
@@ -336,7 +337,7 @@ gleaner-data/
 ```
 
 - **向量不入库**：模型权重和近期论文向量用 `actions/cache` 缓存，丢失后可以重算。反馈记录本身保存标题和摘要，反馈论文的向量（通常只有几百条）每次重算的成本可以忽略。
-- **并发写入**：每次写入前 `git pull --rebase`，失败重试。`.jsonl` 文件配置 `merge=union`，两个任务同时追加同一文件时会自动合并，不会产生冲突。
+- **并发写入**：推送被拒时先 rebase 远端再重试。`.jsonl` 文件配置 `merge=union`，两个任务同时追加同一文件时会自动合并，不会产生冲突。
 
 **核心数据模型（示意）**
 
@@ -353,8 +354,10 @@ class Paper(BaseModel):
 
 
 class ScoredPaper(Paper):
-    coarse_score: float
-    llm_score: int | None
+    coarse_score: float | None
+    coarse_match: str | None  # 向量最接近的兴趣子方向
+    forced: bool  # 命中 include_keywords，跳过了粗筛
+    llm_score: int | None  # None 表示精排失败或未精排
     matched_interests: list[str]
     reason: str
     tldr: str
@@ -386,9 +389,10 @@ paper-gleaner/
 ├── .claude/skills/paper-gleaner/
 │   └── SKILL.md                  # Claude Code Skill
 ├── gleaner/
-│   ├── cli.py                    # typer CLI：daily / handle-comment / deep / compare / sync-feedback / summarize
+│   ├── cli.py                    # typer CLI：check / daily / handle-comment / deep / compare / ...
 │   ├── config.py                 # 读取 config.yaml 与环境变量，pydantic 校验
-│   ├── models.py                 # Paper / ScoredPaper / Feedback / Digest / DeepReport
+│   ├── models.py                 # Paper / ScoredPaper / Digest / Feedback / DeepReport
+│   ├── filters.py                # 去重与关键词过滤
 │   ├── pipelines/
 │   │   ├── daily.py
 │   │   ├── interact.py
@@ -404,7 +408,8 @@ paper-gleaner/
 │   ├── ranking/
 │   │   ├── embedder.py           # fastembed 本地 / OpenAI 兼容 embeddings API
 │   │   ├── coarse.py             # 向量粗筛
-│   │   └── rerank.py             # LLM 精排 + 理由
+│   │   ├── rerank.py             # LLM 精排 + 理由
+│   │   └── overview.py           # 日报概览
 │   ├── reader/
 │   │   ├── fulltext.py           # arXiv HTML / PDF 获取与解析
 │   │   ├── deep_read.py
@@ -414,8 +419,7 @@ paper-gleaner/
 │   │   ├── tools.py              # Agent 工具（只读）
 │   │   └── loop.py               # /ask 的工具调用循环
 │   ├── llm/
-│   │   ├── client.py             # OpenAI 兼容客户端、重试、token 统计与预算
-│   │   └── prompts/              # prompt 模板
+│   │   └── client.py             # OpenAI 兼容客户端、重试、token 统计与预算
 │   ├── notify/
 │   │   ├── base.py               # Notifier 接口
 │   │   ├── github_issue.py
@@ -423,8 +427,9 @@ paper-gleaner/
 │   │   ├── feishu.py
 │   │   └── wecom.py
 │   ├── store/
-│   │   └── data_branch.py        # 读写 gleaner-data 分支
-│   └── render/templates/         # 日报 / 深读 / 对比的 Markdown 模板
+│   │   └── data_branch.py        # 以 git worktree 检出、提交、推送 gleaner-data 分支
+│   └── render/
+│       └── markdown.py           # 日报 / 深读 / 对比的 Markdown 渲染与转义
 ├── integrations/mcp_server/
 │   └── server.py                 # MCP Server（stdio）
 ├── profile/
@@ -450,9 +455,9 @@ paper-gleaner/
 | LLM | `openai` SDK + 自定义 `base_url` | 一套代码适配 DeepSeek、Qwen、Kimi、GLM、OpenAI 等 |
 | 结构化输出 | pydantic + JSON mode | 校验与重试 |
 | PDF / HTML 解析 | PyMuPDF / selectolax | 速度快、依赖少 |
-| GitHub 交互 | PyGithub | Issue、评论、reaction 的读写 |
+| GitHub 交互 | httpx 直接调用 REST API | 只用到少数几个接口，不需要额外依赖，测试时用 respx 模拟 |
 | CLI | typer | |
-| 模板 | Jinja2 | 日报、报告、通知消息的渲染 |
+| Markdown 渲染 | Python 字符串拼接 | 版式简单，集中在 `render/markdown.py`，统一做转义 |
 | MCP | 官方 `mcp` Python SDK | |
 | 测试 | pytest + respx | 用录制的响应 mock HTTP，LLM 调用全部打桩 |
 
@@ -525,13 +530,14 @@ notify:
 | --- | --- | --- |
 | `LLM_API_KEY` | ✅ | LLM 服务的 API Key |
 | `LLM_BASE_URL` | 可选 | 覆盖配置文件中的 `base_url` |
+| `EMBEDDING_API_KEY` | 嵌入使用 API 时可选 | 未设置时沿用 `LLM_API_KEY` |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASSWORD` / `EMAIL_TO` | 启用邮件时 | |
 | `FEISHU_WEBHOOK` / `FEISHU_SECRET` | 启用飞书时 | 自定义机器人地址与签名密钥 |
 | `WECOM_WEBHOOK` | 启用企业微信时 | 群机器人地址 |
 | `ZOTERO_ID` / `ZOTERO_KEY` | 启用 Zotero 时 | |
 | `S2_API_KEY` | 可选 | 提高 Semantic Scholar 的请求限额 |
 
-`GITHUB_TOKEN` 由 Actions 自动提供，不需要用户配置。
+`GITHUB_TOKEN` 由 Actions 自动提供，不需要用户配置。模型名也可以不改配置文件，在仓库的 Actions variables 中设置 `LLM_FAST_MODEL`、`LLM_DEEP_MODEL` 覆盖。
 
 ---
 
@@ -548,7 +554,8 @@ on:
     - cron: "30 3 * * 1-5"   # 北京时间 11:30（兜底）
   workflow_dispatch:
     inputs:
-      force: {type: boolean, default: false}
+      dry_run: {type: boolean, default: false}   # 只运行不发布
+      force: {type: boolean, default: false}     # 当天日报已存在时仍重新生成
 
 permissions:
   contents: write              # 写 gleaner-data 分支
@@ -559,8 +566,9 @@ concurrency:
   cancel-in-progress: false
 ```
 
-- 使用 `actions/cache` 缓存 uv 依赖和嵌入模型权重；
-- 运行结束后把统计（抓取数、粗筛数、推送数、token 用量、耗时）写入 `$GITHUB_STEP_SUMMARY`；
+- 使用 `actions/cache` 缓存 uv 依赖和嵌入模型权重（`~/.cache/paper-gleaner`）；
+- 以 `github-actions[bot]` 身份提交 gleaner-data 分支，凭据来自 `actions/checkout` 保存的 `GITHUB_TOKEN`；
+- 运行结束后把统计（抓取数、精排数、推送数、token 用量、耗时）写入 `$GITHUB_STEP_SUMMARY`；
 - 幂等：当日 Issue 已存在时直接跳过，除非手动触发并设置 `force`。
 
 ### 8.2 `interact.yml`
@@ -667,7 +675,7 @@ GitHub Actions：公开仓库使用标准 runner 免费；私有仓库每次运�
 | 阶段 | 内容 | 交付与验收 |
 | --- | --- | --- |
 | **Phase 0 骨架** ✅ 已完成 | pyproject 与 uv、配置加载与校验、LLM 客户端（重试与用量统计）、arXiv RSS 抓取、CLI 骨架（`check`、`daily --dry-run`）、`ci.yml` | `gleaner daily --dry-run` 能把抓到的论文打印到终端 |
-| **Phase 1 MVP 日报**（约 1 周） | 去重与关键词过滤；兴趣锚点拆解；本地嵌入粗筛；LLM 精排与相关理由；Issue 发布（每篇一条评论）；data 分支存储；`daily.yml` | fork 后配置 Secret 和兴趣描述，手动触发即可收到日报 Issue |
+| **Phase 1 MVP 日报** ✅ 代码完成，待真实环境验证 | 去重与关键词过滤；兴趣锚点拆解；本地嵌入粗筛；LLM 精排与相关理由；Issue 发布（每篇一条评论）；data 分支存储；`daily.yml` | fork 后配置 Secret 和兴趣描述，手动触发即可收到日报 Issue |
 | **Phase 2 交互与深读**（约 1 周） | `interact.yml` 与指令解析；`/deep`（HTML/PDF 获取、代码链接、报告缓存）；`/compare`（多篇对比、单篇与相关工作对比）；`/more`、`/help` | 在日报 Issue 下评论 `/deep 1`，3 分钟内收到报告 |
 | **Phase 3 反馈记忆**（约 1 周） | reaction 同步；`/like`、`/dislike`、`/mute`；反馈锚点参与粗筛；`weekly.yml` 偏好总结 | 连续反馈一周后，`learned_preferences.md` 内容合理，推荐结果有可观察的变化 |
 | **Phase 4 多渠道与生态**（约 1 周） | 邮件、飞书、企业微信；`/ask` Agent；MCP Server；Claude Code Skill；Zotero 可选输入 | 各渠道都能收到推送；在 Claude Code 中可以查询当天推送 |

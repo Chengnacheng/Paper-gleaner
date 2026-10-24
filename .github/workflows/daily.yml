@@ -1,0 +1,68 @@
+name: Daily digest
+
+on:
+  schedule:
+    # arXiv 在美东时间周日至周四 20:00 公告，约为 UTC 周一至周五 00:00–01:00。
+    # 第二个时间点是兜底：GitHub 定时任务偶尔延迟或失败，当天 Issue 已存在时会直接跳过。
+    - cron: "30 1 * * 1-5" # 北京时间 09:30
+    - cron: "30 3 * * 1-5" # 北京时间 11:30（兜底）
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "只运行不发布（不创建 Issue、不提交数据分支）"
+        type: boolean
+        default: false
+      force:
+        description: "当天日报已存在时仍重新生成"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write # 提交 gleaner-data 分支
+  issues: write # 创建日报 Issue 和评论
+
+concurrency:
+  group: gleaner-daily
+  cancel-in-progress: false
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/paper-gleaner
+          key: gleaner-models-${{ hashFiles('config.yaml', 'config.example.yaml') }}
+          restore-keys: gleaner-models-
+
+      - name: Install dependencies
+        run: uv sync --locked --no-dev
+
+      - name: Configure git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Run daily pipeline
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          EMBEDDING_API_KEY: ${{ secrets.EMBEDDING_API_KEY }}
+          LLM_FAST_MODEL: ${{ vars.LLM_FAST_MODEL }}
+          LLM_DEEP_MODEL: ${{ vars.LLM_DEEP_MODEL }}
+          GITHUB_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          args=()
+          if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+          if [ "$FORCE" = "true" ]; then args+=(--force); fi
+          uv run --no-sync gleaner daily "${args[@]}"
