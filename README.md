@@ -28,6 +28,8 @@ uv run ruff check && uv run ruff format --check
 uv run pytest
 ```
 
+本地也可以把 `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL` 或 `OPENAI_API_KEY`、`OPENAI_BASE_URL` 写入仓库根目录的 `.env`；默认优先使用 DeepSeek，设置 `LLM_PROVIDER=openai` 可切换到 OpenAI。模型名可用 `DEEPSEEK_FAST_MODEL` / `DEEPSEEK_DEEP_MODEL` 或对应的 `OPENAI_*` 变量覆盖。GitHub Actions 中继续使用 `LLM_API_KEY` 和 `LLM_BASE_URL` Secrets。
+
 ## 目录结构
 
 ```text

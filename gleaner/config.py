@@ -14,6 +14,7 @@ from typing import Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
+from dotenv import load_dotenv
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -158,7 +159,10 @@ def resolve_config_path(path: Path | None = None) -> Path:
 
 def load_config(path: Path, env: Mapping[str, str] | None = None) -> Config:
     """读取并校验配置文件，再用环境变量补充密钥。"""
-    env = os.environ if env is None else env
+    if env is None:
+        # Load a repo-local .env for local development; explicit process variables win.
+        load_dotenv(dotenv_path=path.parent / ".env", override=False)
+        env = os.environ
 
     try:
         raw: Any = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -180,12 +184,36 @@ def load_config(path: Path, env: Mapping[str, str] | None = None) -> Config:
     except ValidationError as e:
         raise ConfigError(_format_validation_error(path, e)) from e
 
-    # GitHub Actions 中未配置的 Secret 会以空字符串传入，按未设置处理
-    if api_key := env.get("LLM_API_KEY", "").strip():
+    provider = env.get("LLM_PROVIDER", "").strip().lower()
+    if provider not in {"", "deepseek", "openai"}:
+        raise ConfigError("LLM_PROVIDER 必须是 deepseek 或 openai")
+
+    # GitHub Actions 中未配置的 Secret 会以空字符串传入，按未设置处理。
+    # LLM_* 保持兼容；本地 .env 也可按供应商分别使用 *_API_KEY / *_BASE_URL。
+    provider_prefix = provider.upper() if provider else "DEEPSEEK"
+    key_names = ["LLM_API_KEY", f"{provider_prefix}_API_KEY"]
+    base_url_names = ["LLM_BASE_URL", f"{provider_prefix}_BASE_URL"]
+    if not provider:
+        key_names += ["OPENAI_API_KEY"]
+        base_url_names += ["OPENAI_BASE_URL"]
+
+    if api_key := _first_env(env, key_names):
         config.llm.api_key = SecretStr(api_key)
-    if base_url := env.get("LLM_BASE_URL", "").strip():
+    if base_url := _first_env(env, base_url_names):
         config.llm.base_url = base_url
+    model_prefix = provider.upper() if provider else "DEEPSEEK"
+    for tier in ("fast", "deep"):
+        model_names = [f"LLM_{tier.upper()}_MODEL", f"{model_prefix}_{tier.upper()}_MODEL"]
+        if model := _first_env(env, model_names):
+            setattr(config.llm.models, tier, model)
     return config
+
+
+def _first_env(env: Mapping[str, str], names: list[str]) -> str:
+    for name in names:
+        if value := env.get(name, "").strip():
+            return value
+    return ""
 
 
 def _format_validation_error(path: Path, error: ValidationError) -> str:

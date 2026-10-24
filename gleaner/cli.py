@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import sys
 from collections import Counter
 from pathlib import Path
 from typing import Annotated
@@ -40,10 +42,19 @@ ConfigOption = Annotated[
 def main(
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="输出调试日志")] = False,
 ) -> None:
+    _configure_stdio()
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.WARNING,
         format="%(levelname)s %(name)s: %(message)s",
     )
+
+
+def _configure_stdio() -> None:
+    """Use UTF-8 on Windows consoles while preserving redirected streams."""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            with contextlib.suppress(OSError, ValueError):
+                stream.reconfigure(encoding="utf-8")
 
 
 @app.command()

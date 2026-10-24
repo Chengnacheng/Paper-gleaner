@@ -78,6 +78,36 @@ def test_env_provides_secrets(tmp_path: Path) -> None:
     assert config.llm.base_url == "https://dashscope.example/v1"
 
 
+def test_provider_specific_env_aliases(tmp_path: Path) -> None:
+    config = load_config(
+        write(tmp_path, ""),
+        env={
+            "DEEPSEEK_API_KEY": "sk-deepseek",
+            "DEEPSEEK_BASE_URL": "https://deepseek.example/v1",
+        },
+    )
+    assert config.llm.api_key is not None
+    assert config.llm.api_key.get_secret_value() == "sk-deepseek"
+    assert config.llm.base_url == "https://deepseek.example/v1"
+
+    config = load_config(
+        write(tmp_path, ""),
+        env={
+            "LLM_PROVIDER": "openai",
+            "OPENAI_API_KEY": "sk-openai",
+            "OPENAI_BASE_URL": "https://openai.example/v1",
+            "OPENAI_FAST_MODEL": "gpt-test-fast",
+            "OPENAI_DEEP_MODEL": "gpt-test-deep",
+            "DEEPSEEK_API_KEY": "sk-deepseek",
+        },
+    )
+    assert config.llm.api_key is not None
+    assert config.llm.api_key.get_secret_value() == "sk-openai"
+    assert config.llm.base_url == "https://openai.example/v1"
+    assert config.llm.models.fast == "gpt-test-fast"
+    assert config.llm.models.deep == "gpt-test-deep"
+
+
 def test_empty_env_values_are_ignored(tmp_path: Path) -> None:
     # GitHub Actions 中未配置的 Secret 是空字符串
     config = load_config(write(tmp_path, ""), env={"LLM_API_KEY": "", "LLM_BASE_URL": " "})
