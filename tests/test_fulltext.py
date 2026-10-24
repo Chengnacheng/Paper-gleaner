@@ -5,9 +5,11 @@ import respx
 from gleaner.models import Paper
 from gleaner.reader import FullText, FulltextError, FulltextFetcher, Section
 from gleaner.reader.fulltext import (
+    MAX_LINKS,
     TRUNCATION_MARK,
     classify_section,
     estimate_tokens,
+    extract_code_links,
     parse_html,
     parse_pdf,
     truncate_to_tokens,
@@ -98,6 +100,25 @@ def test_truncate_to_tokens() -> None:
 )
 def test_classify_section(title: str, appendix: bool, kind: str) -> None:
     assert classify_section(title, appendix=appendix) == kind
+
+
+def test_extract_code_links() -> None:
+    texts = [
+        "Code: https://github.com/Foo/Bar.git, mirrored at github.com/foo/bar/tree/main/src.",
+        "https://github.com/features/actions and https://github.com/someone",
+        "https://gitlab.com/group/sub/repo/-/blob/main/train.py",
+        "(https://huggingface.co/datasets/org/data) https://huggingface.co/org/model-7b.",
+        "https://huggingface.co/papers/2610.00001 https://someone.github.io/project",
+    ]
+    assert extract_code_links(texts) == [
+        "https://github.com/Foo/Bar",
+        "https://gitlab.com/group/sub/repo",
+        "https://huggingface.co/datasets/org/data",
+        "https://huggingface.co/org/model-7b",
+    ]
+
+    many = [f"https://github.com/org/repo{i}" for i in range(MAX_LINKS + 5)]
+    assert len(extract_code_links(many)) == MAX_LINKS
 
 
 # --- 按优先级渲染 ---------------------------------------------------------------
@@ -193,6 +214,12 @@ def test_parse_html(html_text: str) -> None:
     assert "Jensen" not in rendered
     assert "## Appendix B Implementation Details" in rendered
 
+    # 参考文献中的仓库链接属于其它工作，不算本文的代码
+    assert fulltext.links == [
+        "https://github.com/example/longkv",
+        "https://huggingface.co/example/longkv-7b",
+    ]
+
 
 @pytest.mark.parametrize(
     "html",
@@ -232,6 +259,21 @@ def test_parse_pdf() -> None:
     assert sections["2 Method"] == "We split the cache into three tiers."
     assert "arXiv" not in sections["3 Experiments"]
     assert "School" not in fulltext.render(30_000)
+
+
+def test_parse_pdf_links() -> None:
+    pages = [
+        ["1 Introduction", "Code: https://github.com/example/longkv.", "2 Method", "Text."],
+        ["References", "[1] https://github.com/other/kvquant"],
+    ]
+    content = make_pdf(pages, links=("https://huggingface.co/datasets/example/pg19-long",))
+
+    fulltext = parse_pdf(content)
+
+    assert fulltext.links == [
+        "https://huggingface.co/datasets/example/pg19-long",
+        "https://github.com/example/longkv",
+    ]
 
 
 def test_parse_pdf_uses_metadata_abstract_and_split_heading() -> None:

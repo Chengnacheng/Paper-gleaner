@@ -6,8 +6,10 @@
 3. 都失败时只用摘要，由调用方在回复中注明。
 
 切分后按章节优先级截断到 token 预算：Abstract、Introduction、Method、Experiments、
-Conclusion 优先；References、致谢和大部分附录跳过。全文是不可信的外部内容，
-只作为数据交给 LLM（见 reader/prompt.py）。
+Conclusion 优先；References、致谢和大部分附录跳过。同时从正文（不含参考文献）中提取
+GitHub、GitLab、Hugging Face 链接，作为「代码与资源」的候选。
+
+全文是不可信的外部内容，只作为数据交给 LLM（见 reader/prompt.py）。
 """
 
 from __future__ import annotations
@@ -15,9 +17,10 @@ from __future__ import annotations
 import logging
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Literal
+from urllib.parse import urlsplit
 
 import httpx
 import pymupdf
@@ -89,6 +92,19 @@ _USEFUL_APPENDIX = (
     "dataset",
 )
 
+# 代码与资源链接：GitHub / GitLab 仓库，Hugging Face 模型、数据集和 Space
+_LINK_RE = re.compile(
+    r"(?<![\w.])(?:https?://)?(?:www\.)?(?:github\.com|gitlab\.com|huggingface\.co)/"
+    r"[^\s<>()\[\]{}\"'`|]+",
+    re.IGNORECASE,
+)
+# 这些路径是站点页面而不是仓库
+_NOT_REPO = {
+    "github.com": {"about", "collections", "explore", "features", "marketplace", "orgs", "topics"},
+    "huggingface.co": {"blog", "collections", "docs", "learn", "models", "papers", "tasks"},
+}
+MAX_LINKS = 10
+
 logger = logging.getLogger(__name__)
 
 
@@ -107,6 +123,7 @@ class Section:
 class FullText:
     source: FulltextSource
     sections: list[Section]
+    links: list[str] = field(default_factory=list)  # 正文中的代码与资源链接
     notes: list[str] = field(default_factory=list)  # 降级说明，如「HTML：HTTP 404」
     title: str = ""  # 从 HTML 中解析出的标题和摘要，元数据缺失时补用
     abstract: str = ""
@@ -163,6 +180,39 @@ def truncate_to_tokens(text: str, max_tokens: int) -> str:
     if space > len(head) * 0.8:  # 不截断单词，但也不为此丢掉太多内容
         head = head[:space]
     return head.rstrip() + TRUNCATION_MARK
+
+
+def extract_code_links(texts: Iterable[str]) -> list[str]:
+    """从文本或链接地址中找出代码与资源链接，规范成仓库首页地址，按出现顺序去重。"""
+    links: dict[str, str] = {}
+    for text in texts:
+        for match in _LINK_RE.finditer(text):
+            link = _normalize_link(match.group(0))
+            if link is not None:
+                links.setdefault(link.lower(), link)
+    return list(links.values())[:MAX_LINKS]
+
+
+def _normalize_link(url: str) -> str | None:
+    url = url.rstrip(".,;:!?*_")
+    parsed = urlsplit(url if "://" in url else f"https://{url}")
+    host = parsed.netloc.lower().removeprefix("www.")
+    parts = [part for part in parsed.path.split("/") if part]
+    if not parts or parts[0].lower() in _NOT_REPO.get(host, set()):
+        return None
+    if host == "gitlab.com":
+        # GitLab 支持多级分组；"/-/" 之后是仓库内的页面
+        parts = parts[: parts.index("-")] if "-" in parts else parts
+        depth = len(parts)
+    elif host == "huggingface.co" and parts[0] in {"datasets", "spaces"}:
+        depth = 3  # 数据集和 Space 比模型多一级前缀
+    else:
+        depth = 2  # GitHub 仓库和 Hugging Face 模型都是 <用户>/<名称>
+    if len(parts) < max(depth, 2):
+        return None
+    repo = parts[:depth]
+    repo[-1] = repo[-1].removesuffix(".git")
+    return f"https://{host}/" + "/".join(repo)
 
 
 def classify_section(title: str, *, appendix: bool = False) -> SectionKind:
@@ -257,6 +307,7 @@ def parse_html(html: str) -> FullText:
     _prepare(article)
 
     sections: list[Section] = []
+    skipped: set[int] = set()  # 跳过的章节（参考文献等），其中的链接不算本文的代码
     abstract_node = article.css_first("div.ltx_abstract")
     abstract = _node_text(abstract_node) if abstract_node is not None else ""
     if abstract:
@@ -271,6 +322,8 @@ def parse_html(html: str) -> FullText:
             kind: SectionKind = "skip"
         else:
             kind = classify_section(name, appendix="ltx_appendix" in classes)
+        if kind == "skip":
+            skipped.add(node.mem_id)
         sections.append(Section(name, _node_text(node), kind))
 
     if len(sections) <= 1:
@@ -279,7 +332,24 @@ def parse_html(html: str) -> FullText:
         if not body:
             raise FulltextError("页面中没有论文正文")
         sections = [Section("", body, "method")]
-    return FullText("html", sections, title=title, abstract=abstract)
+
+    hrefs = [
+        a.attributes.get("href") or ""
+        for a in article.css("a[href]")
+        if not _has_ancestor(a, skipped, article)
+    ]
+    texts = [s.text for s in sections if s.kind != "skip"]
+    links = extract_code_links([*hrefs, *texts])
+    return FullText("html", sections, links=links, title=title, abstract=abstract)
+
+
+def _has_ancestor(node: LexborNode, ids: set[int], root: LexborNode) -> bool:
+    parent = node.parent
+    while parent is not None and parent.mem_id != root.mem_id:
+        if parent.mem_id in ids:
+            return True
+        parent = parent.parent
+    return False
 
 
 def _prepare(root: LexborNode) -> None:
@@ -340,22 +410,29 @@ def parse_pdf(content: bytes, *, abstract: str = "") -> FullText:
         raise FulltextError(f"无法解析 PDF（{e}）") from e
 
     blocks: list[_PdfBlock] = []
+    uris: list[tuple[int, str]] = []  # 链接注释（页码，地址）
     with document:
         for page in document:
             for block in page.get_text("blocks"):
                 if block[6] == 0 and (text := block[4].strip()):  # 0 表示文本块（1 是图片）
                     blocks.append(_PdfBlock(text, page.number))
+            uris.extend((page.number, link["uri"]) for link in page.get_links() if link.get("uri"))
 
-    sections = _split_pdf_blocks(blocks)
+    sections, references_page = _split_pdf_blocks(blocks)
     if not sections or all(s.kind == "skip" for s in sections):
         raise FulltextError("PDF 中没有可用的文本")
     if abstract and not any(s.kind == "abstract" for s in sections):
         sections.insert(0, Section("Abstract", abstract, "abstract"))
-    return FullText("pdf", sections)
+    # 参考文献所在页及之后的链接注释多半属于引用的其它工作，不算本文的代码
+    annotations = [uri for page, uri in uris if references_page is None or page < references_page]
+    texts = [s.text for s in sections if s.kind != "skip"]
+    return FullText("pdf", sections, links=extract_code_links([*annotations, *texts]))
 
 
-def _split_pdf_blocks(blocks: list[_PdfBlock]) -> list[Section]:
+def _split_pdf_blocks(blocks: list[_PdfBlock]) -> tuple[list[Section], int | None]:
+    """切分章节，同时返回 References 标题所在的页码（没有时为 None）。"""
     sections: list[Section] = []
+    references_page: int | None = None
     current: Section | None = None
     body: list[str] = []
     last_number = 0
@@ -409,6 +486,7 @@ def _split_pdf_blocks(blocks: list[_PdfBlock]) -> list[Section]:
         kind = classify_section(heading, appendix=appendix)
         if kind == "skip" and heading.lower().startswith(("reference", "bibliograph")):
             appendix = True
+            references_page = block.page if references_page is None else references_page
         current, body = Section(heading, "", kind), []
         if rest:
             body.append(_join_lines("\n".join(rest)))
@@ -417,8 +495,8 @@ def _split_pdf_blocks(blocks: list[_PdfBlock]) -> list[Section]:
     if not sections:
         # 认不出任何标题：整篇作为一节
         text = "\n".join(_join_lines(b.text) for b in blocks if not _NOISE_BLOCK.match(b.text))
-        return [Section("", text, "method")] if text else []
-    return sections
+        return ([Section("", text, "method")] if text else []), None
+    return sections, references_page
 
 
 def _looks_like_title(text: str) -> bool:
