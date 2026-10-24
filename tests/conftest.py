@@ -27,7 +27,10 @@ def empty_rss_bytes() -> bytes:
 
 
 def git(*args: str, cwd: Path) -> str:
-    result = subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+    # git 输出 UTF-8；不指定编码时 Windows 会按系统默认编码（如 GBK）解码而出错
+    result = subprocess.run(
+        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True, encoding="utf-8"
+    )
     return result.stdout.strip()
 
 

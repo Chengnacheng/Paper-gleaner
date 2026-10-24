@@ -48,7 +48,7 @@ def test_store_jsonl(tmp_path: Path) -> None:
     store.append_jsonl("log.jsonl", [{"a": 1}, {"a": 2}])
     store.append_jsonl("log.jsonl", [])
     store.append_jsonl("log.jsonl", [{"a": 3}])
-    with (tmp_path / "log.jsonl").open("a") as f:
+    with (tmp_path / "log.jsonl").open("a", encoding="utf-8") as f:
         f.write("not json\n\n")
 
     assert store.read_jsonl("log.jsonl") == [{"a": 1}, {"a": 2}, {"a": 3}]

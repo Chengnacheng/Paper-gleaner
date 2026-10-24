@@ -10,11 +10,19 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python-version: ["3.11", "3.13"]
+        include:
+          # 也在 Windows 上跑，覆盖编码、路径、换行符等平台差异
+          - os: windows-latest
+            python-version: "3.13"
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
