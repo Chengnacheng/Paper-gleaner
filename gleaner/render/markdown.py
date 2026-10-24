@@ -10,10 +10,13 @@ import html
 import re
 from datetime import date
 
-from gleaner.models import Digest, RunStats, ScoredPaper
+from gleaner.models import Digest, Paper, RunStats, ScoredPaper
 
 TITLE_PREFIX = "📚 Paper Gleaner"
 _ZERO_WIDTH_SPACE = "​"
+# GitHub 评论正文最多 65536 个字符；拆分时留出余量给「续」的提示
+COMMENT_LIMIT = 65_536
+SPLIT_LIMIT = 60_000
 
 
 def issue_title_prefix(day: date) -> str:
@@ -35,7 +38,7 @@ def issue_body(digest: Digest, *, per_paper_comment: bool = True) -> str:
     for index, paper in enumerate(digest.papers, start=1):
         score = "—" if paper.llm_score is None else str(paper.llm_score)
         interests = "、".join(paper.matched_interests) or paper.coarse_match or ""
-        rows.append(f"| {index} | {_link(paper)} | {score} | {_cell(interests)} |")
+        rows.append(f"| {index} | {paper_link(paper)} | {score} | {_cell(interests)} |")
     parts.append("\n".join(rows))
 
     if per_paper_comment:
@@ -88,8 +91,8 @@ def stats_line(stats: RunStats) -> str:
     tokens = stats.prompt_tokens + stats.completion_tokens
     minutes, seconds = divmod(round(stats.duration_seconds), 60)
     usage = (
-        f"LLM 调用 {stats.llm_calls} 次 · token {_kilo(tokens)}"
-        f"（输入 {_kilo(stats.prompt_tokens)} / 输出 {_kilo(stats.completion_tokens)}）"
+        f"LLM 调用 {stats.llm_calls} 次 · token {kilo(tokens)}"
+        f"（输入 {kilo(stats.prompt_tokens)} / 输出 {kilo(stats.completion_tokens)}）"
         f" · 耗时 {minutes} 分 {seconds} 秒"
     )
     if stats.failed_batches:
@@ -111,18 +114,82 @@ def sanitize_markdown(text: str) -> str:
     return sanitize(text).replace("&gt;", ">")
 
 
-def _cell(text: str) -> str:
-    return " ".join(sanitize(text).split()).replace("|", "\\|")
+def split_comment(body: str, limit: int = SPLIT_LIMIT) -> list[str]:
+    """把超长的回复拆成多条评论，每条不超过 limit 个字符。
+
+    尽量在空行处断开；必须在代码块或 <details> 折叠块中间断开时，先把它们闭合，
+    下一条评论开头再重新打开。
+    """
+    if len(body) <= limit:
+        return [body]
+    budget = limit - 200  # 留给闭合标记和「续」的提示
+    chunks: list[list[str]] = []
+    current: list[str] = []
+    breaks: list[int] = []  # current 中可以安全断开的位置（空行之后、不在代码块或折叠块内）
+    size = 0
+    fence: str | None = None  # 所在代码块的开头一行，如 "```python"
+    depth = 0  # 未闭合的 <details> 层数
+
+    for line in _wrap_lines(body.split("\n"), budget // 2):
+        while size + len(line) + 1 > budget and current:
+            if breaks:
+                cut = breaks[-1]
+                chunks.append(current[:cut])
+                current = current[cut:]
+            else:
+                closers = (["```"] if fence else []) + ["</details>"] * depth
+                chunks.append(current + closers)
+                current = ["<details><summary>（续）</summary>", ""] * depth
+                current += [fence] if fence else []
+            size = sum(len(item) + 1 for item in current)
+            breaks = []
+        current.append(line)
+        size += len(line) + 1
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            fence = None if fence else stripped
+        elif fence is None:
+            depth = max(depth + stripped.count("<details") - stripped.count("</details>"), 0)
+        if fence is None and depth == 0 and not stripped:
+            breaks.append(len(current))
+    chunks.append(current)
+
+    parts = ["\n".join(chunk).strip("\n") for chunk in chunks]
+    parts = [part for part in parts if part.strip()]
+    total = len(parts)
+    for index in range(total):
+        if index > 0:
+            parts[index] = f"<sub>（续 {index + 1}/{total}）</sub>\n\n{parts[index]}"
+        if index < total - 1:
+            parts[index] += "\n\n<sub>（未完，见下一条评论）</sub>"
+    return parts
 
 
-def _link(paper: ScoredPaper) -> str:
+def _wrap_lines(lines: list[str], width: int) -> list[str]:
+    """把超长的单行（如巨大的表格行）硬切成几段，保证每段都能放进一条评论。"""
+    wrapped: list[str] = []
+    for line in lines:
+        while len(line) > width:
+            wrapped.append(line[:width])
+            line = line[width:]
+        wrapped.append(line)
+    return wrapped
+
+
+def paper_link(paper: Paper) -> str:
+    """标题链接到 arXiv 摘要页；标题经过转义，可以放进表格单元格。"""
     title = _cell(paper.title).replace("[", "\\[").replace("]", "\\]")
     return f"[{title}]({paper.url})"
+
+
+def _cell(text: str) -> str:
+    return " ".join(sanitize(text).split()).replace("|", "\\|")
 
 
 def _truncate(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit].rstrip() + "…"
 
 
-def _kilo(value: int) -> str:
+def kilo(value: int) -> str:
+    """把 token 数写成 12.3k 这样的形式。"""
     return f"{value / 1000:.1f}k" if value >= 1000 else str(value)

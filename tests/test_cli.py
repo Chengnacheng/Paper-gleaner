@@ -1,3 +1,4 @@
+import json
 from collections.abc import Callable
 from datetime import date, datetime
 from pathlib import Path
@@ -13,12 +14,18 @@ from gleaner.cli import _report, app
 from gleaner.llm import LLMClient
 from gleaner.models import Digest, ScoredPaper
 from gleaner.notify import IssueRef
-from gleaner.pipelines.daily import DailyResult
+from gleaner.pipelines.daily import DailyResult, digest_path
+from gleaner.store import DataBranch
 from tests.conftest import (
+    DEEP_REPORT,
+    DIGEST_DAY,
+    FIXTURES,
     PIPELINE_VOCABULARY,
     FakeOpenAI,
     KeywordEmbedder,
     git,
+    interact_digest,
+    interact_llm,
     pipeline_llm,
 )
 
@@ -38,6 +45,8 @@ ENV_VARS = [
     "GITHUB_REPOSITORY",
     "GITHUB_API_URL",
     "GITHUB_STEP_SUMMARY",
+    "GITHUB_EVENT_PATH",
+    "S2_API_KEY",
 ]
 
 
@@ -275,3 +284,154 @@ def test_report_warns_about_missing_comments() -> None:
     existing = IssueRef(5, "https://github.com/o/r/issues/5")
     repaired = _report(DailyResult("repaired", digest, existing))
     assert repaired == "✓ 已补发缺失的论文评论：https://github.com/o/r/issues/5"
+
+
+# --- 指令交互 -------------------------------------------------------------------
+
+HTML_URL = "https://arxiv.org/html/2610.00001"
+
+
+@pytest.fixture
+def interact_repo(
+    repo: Path, clone: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """repo 之外再准备好 gleaner-data 分支上的日报，LLM 换成深读、对比用的假模型。"""
+    seed_repo = clone("data-seed")  # "seed" 已被 git_remote 占用
+    seed = DataBranch(seed_repo, seed_repo / ".gleaner-data", backoff_seconds=0)
+    seed.checkout().write_model(digest_path(DIGEST_DAY), interact_digest())
+    seed.commit_and_push("data: seed digest")
+    monkeypatch.setattr(
+        cli, "LLMClient", lambda config: LLMClient(config, client=FakeOpenAI(interact_llm))
+    )
+    return repo
+
+
+def event_file(tmp_path: Path, body: str) -> Path:
+    data = json.loads((FIXTURES / "issue_comment_event.json").read_text(encoding="utf-8"))
+    data["comment"]["body"] = body
+    path = tmp_path / "event.json"
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def remote_files(remote: Path) -> list[str]:
+    return git("ls-tree", "-r", "--name-only", "gleaner-data", cwd=remote).split()
+
+
+def test_handle_comment_dry_run(interact_repo: Path, tmp_path: Path, git_remote: Path) -> None:
+    before = git("rev-parse", "gleaner-data", cwd=git_remote)
+
+    result = runner.invoke(
+        app, ["handle-comment", "--event", str(event_file(tmp_path, "/more 2")), "--dry-run"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "· 给评论 9001 加 eyes" in result.output
+    assert "----- 回复 Issue 1（第 1 条）-----" in result.output
+    assert "### [3] Candidate 0" in result.output
+    assert "### [4] Candidate 1" in result.output
+    assert "· 给评论 9001 加 rocket" in result.output
+    assert "✓ 完成 `/more 2`" in result.output
+    assert git("rev-parse", "gleaner-data", cwd=git_remote) == before
+
+
+@respx.mock
+def test_handle_comment_posts_reply_and_caches_report(
+    interact_repo: Path,
+    tmp_path: Path,
+    git_remote: Path,
+    html_text: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    github_env(monkeypatch)
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event_file(tmp_path, "/deep 1")))
+    respx.get(HTML_URL).mock(return_value=httpx.Response(200, text=html_text))
+    reactions = respx.post(f"{API}/issues/comments/9001/reactions").mock(
+        return_value=httpx.Response(201, json={})
+    )
+    comments = respx.post(f"{API}/issues/1/comments").mock(
+        return_value=httpx.Response(201, json={"id": 555})
+    )
+
+    result = runner.invoke(app, ["handle-comment"])
+
+    assert result.exit_code == 0, result.output
+    assert [json.loads(c.request.content)["content"] for c in reactions.calls] == [
+        "eyes",
+        "rocket",
+    ]
+    assert DEEP_REPORT in json.loads(comments.calls[0].request.content)["body"]
+    files = remote_files(git_remote)
+    assert "reports/2610.00001.md" in files
+    assert any(f.startswith("feedback/") for f in files)  # 按当前月份分片
+    assert "## Paper Gleaner · Issue 1" in summary.read_text(encoding="utf-8")
+
+
+@respx.mock
+def test_handle_comment_reports_config_errors(
+    interact_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    github_env(monkeypatch)
+    (interact_repo / "config.yaml").write_text("ranking:\n  top_n: 5\n")
+    respx.post(f"{API}/issues/comments/9001/reactions").mock(
+        return_value=httpx.Response(201, json={})
+    )
+    comments = respx.post(f"{API}/issues/1/comments").mock(
+        return_value=httpx.Response(201, json={"id": 555})
+    )
+
+    result = runner.invoke(app, ["handle-comment", "--event", str(event_file(tmp_path, "/help"))])
+
+    assert result.exit_code == 1
+    body = json.loads(comments.calls[0].request.content)["body"]
+    assert body.startswith("⚠️ 配置有误，请检查 config.yaml：")
+    assert "ranking.top_n" in body
+
+
+def test_handle_comment_requires_event(repo: Path, tmp_path: Path) -> None:
+    result = runner.invoke(app, ["handle-comment", "--dry-run"])
+    assert result.exit_code == 1
+    assert "GITHUB_EVENT_PATH" in result.output
+
+    missing = runner.invoke(app, ["handle-comment", "--event", str(tmp_path / "x.json")])
+    assert missing.exit_code == 1
+    assert "找不到事件文件" in missing.output
+
+
+def test_handle_comment_requires_github_token(repo: Path, tmp_path: Path) -> None:
+    result = runner.invoke(app, ["handle-comment", "--event", str(event_file(tmp_path, "/help"))])
+    assert result.exit_code == 1
+    assert "GITHUB_TOKEN" in result.output
+
+
+@respx.mock
+def test_local_deep(interact_repo: Path, git_remote: Path, html_text: str) -> None:
+    respx.get(HTML_URL).mock(return_value=httpx.Response(200, text=html_text))
+
+    result = runner.invoke(app, ["deep", "1"])  # 按最近一份日报解析序号
+
+    assert result.exit_code == 0, result.output
+    assert "## 🔍 深读 · [LongKV" in result.output
+    assert DEEP_REPORT in result.output
+    assert "reports/2610.00001.md" not in remote_files(git_remote)
+
+
+@respx.mock
+def test_local_compare(interact_repo: Path, html_text: str) -> None:
+    respx.get(HTML_URL).mock(return_value=httpx.Response(200, text=html_text))
+    respx.get("https://arxiv.org/html/2610.00002").mock(
+        return_value=httpx.Response(200, text=html_text)
+    )
+
+    result = runner.invoke(app, ["compare", "1", "2610.00002", "--day", "2026-10-25"])
+
+    assert result.exit_code == 0, result.output
+    assert "## ⚖️ 对比 · 2 篇论文" in result.output
+
+
+def test_local_deep_reports_bad_refs(interact_repo: Path) -> None:
+    result = runner.invoke(app, ["deep", "9"])
+    assert result.exit_code == 1
+    assert "序号 9 超出范围" in result.output

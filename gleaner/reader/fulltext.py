@@ -103,6 +103,7 @@ _NOT_REPO = {
     "github.com": {"about", "collections", "explore", "features", "marketplace", "orgs", "topics"},
     "huggingface.co": {"blog", "collections", "docs", "learn", "models", "papers", "tasks"},
 }
+_PATH_PART_RE = re.compile(r"^[\w.\-]+$")
 MAX_LINKS = 10
 
 logger = logging.getLogger(__name__)
@@ -208,9 +209,10 @@ def _normalize_link(url: str) -> str | None:
         depth = 3  # 数据集和 Space 比模型多一级前缀
     else:
         depth = 2  # GitHub 仓库和 Hugging Face 模型都是 <用户>/<名称>
-    if len(parts) < max(depth, 2):
-        return None
     repo = parts[:depth]
+    # 只接受由字母、数字和 ._- 组成的路径，回复里可以原样放进链接
+    if len(repo) < max(depth, 2) or not all(_PATH_PART_RE.match(part) for part in repo):
+        return None
     repo[-1] = repo[-1].removesuffix(".git")
     return f"https://{host}/" + "/".join(repo)
 
@@ -260,7 +262,8 @@ class FulltextFetcher:
             logger.info("%s 的 PDF 不可用：%s", paper.id, e)
             notes.append(f"PDF：{e}")
         sections = [Section("Abstract", paper.abstract, "abstract")] if paper.abstract else []
-        return FullText("abstract", sections, notes=notes)
+        links = extract_code_links([paper.abstract])  # 不少摘要末尾写着代码地址
+        return FullText("abstract", sections, links=links, notes=notes)
 
     def _download(self, url: str) -> httpx.Response:
         self._limiter.wait()

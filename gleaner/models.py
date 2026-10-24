@@ -76,3 +76,19 @@ class DeepReport(BaseModel):
     source: Literal["html", "pdf", "abstract"]  # 全文来源；abstract 表示只用了摘要
     generated_at: datetime
     body: str  # 模型输出的 Markdown，未转义；发到 GitHub 前再转义
+
+
+class Feedback(BaseModel):
+    """一条反馈，按月追加到 gleaner-data 分支的 feedback/<YYYY-MM>.jsonl。
+
+    Phase 2 只写入 /deep、/compare 产生的隐式正反馈，Phase 3 再读取并参与粗筛。
+    """
+
+    paper_id: str
+    title: str
+    abstract: str
+    signal: Literal["up", "down", "like", "dislike", "deep", "compare"]
+    weight: float
+    note: str | None = None  # /like 或 /dislike 附带的原因
+    source: Literal["reaction", "command"]
+    created_at: datetime

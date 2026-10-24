@@ -2,6 +2,7 @@ import json
 import re
 import subprocess
 from collections.abc import Callable
+from datetime import UTC, date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -10,10 +11,14 @@ import numpy as np
 import pymupdf
 import pytest
 
-from gleaner.config import LLMConfig
+from gleaner.agent import Services
+from gleaner.config import ArxivConfig, LLMConfig
 from gleaner.llm import LLMClient
+from gleaner.models import Digest, ScoredPaper
 from gleaner.ranking.embedder import normalize
-from gleaner.sources.arxiv import ARXIV_RATE_LIMITER
+from gleaner.reader import FulltextFetcher
+from gleaner.sources import ArxivSource, SemanticScholar
+from gleaner.sources.arxiv import ARXIV_RATE_LIMITER, RateLimiter
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -177,3 +182,72 @@ def pipeline_llm(scores: dict[str, int]) -> Callable[[dict[str, Any]], str]:
         raise AssertionError(f"意外的 prompt：{prompt[:80]}")
 
     return handler
+
+
+# --- 指令交互 -------------------------------------------------------------------
+
+DIGEST_DAY = date(2026, 10, 25)
+DEEP_REPORT = "### 一句话总结\n分层压缩 KV cache。\n\n### 实验\n| 方法 | PPL |\n| --- | --- |"
+COMPARE_BODY = "### 一句话结论\n[1] 更省显存。"
+RELATED_BODY = "### 定位\n延续了 R1。"
+
+
+def interact_digest(**fields: Any) -> Digest:
+    """2026-10-25 的日报：推荐 2 篇（序号 1–2），另有 3 篇候选（序号 3–5）。"""
+    papers = [
+        ScoredPaper(
+            id="2610.00001",
+            title="LongKV: Hierarchical KV Cache Compression",
+            abstract="We compress the KV cache.",
+            authors=["Alice Zhang", "Bob Li"],
+            categories=["cs.CL"],
+            llm_score=9,
+        ),
+        ScoredPaper(id="2610.00002", title="RAG for Science", abstract="A RAG benchmark."),
+    ]
+    others = [
+        ScoredPaper(
+            id=f"2610.0001{i}",
+            title=f"Candidate {i}",
+            abstract=f"Candidate abstract {i}.",
+            llm_score=5,
+            reason=f"候选 {i} 的理由",
+            tldr=f"候选 {i} 的一句话摘要",
+        )
+        for i in range(3)
+    ]
+    values = {
+        "day": DIGEST_DAY,
+        "generated_at": datetime(2026, 10, 25, 1, 30, tzinfo=UTC),
+        "papers": papers,
+        "others": others,
+        "issue_number": 1,
+        "issue_url": "https://github.com/o/r/issues/1",
+    } | fields
+    return Digest(**values)
+
+
+def interact_llm(request: dict[str, Any]) -> str:
+    """按 system prompt 区分深读、多篇对比和相关工作对比。"""
+    system = request["messages"][0]["content"]
+    if "深读报告" in system:
+        return DEEP_REPORT
+    if "横向对比" in system:
+        return COMPARE_BODY
+    if "放到相关工作中比较" in system:
+        return RELATED_BODY
+    raise AssertionError(f"意外的 prompt：{system[:80]}")
+
+
+def interact_services(
+    handler: Callable[[dict[str, Any]], str] = interact_llm,
+) -> tuple[Services, FakeOpenAI]:
+    """真实的 arXiv / 全文 / Semantic Scholar 客户端（请求由 respx 模拟）加假 LLM。"""
+    fake = FakeOpenAI(handler)
+    services = Services(
+        arxiv=ArxivSource(ArxivConfig()),
+        fetcher=FulltextFetcher(limiter=RateLimiter(0)),
+        s2=SemanticScholar(backoff_seconds=0),
+        llm_factory=lambda: LLMClient(LLMConfig(), client=fake),
+    )
+    return services, fake

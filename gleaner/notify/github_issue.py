@@ -37,7 +37,7 @@ class IssueRef:
 
 
 class GitHubClient:
-    """GitHub REST API 的最小封装，只包含日报需要的几个接口。"""
+    """GitHub REST API 的最小封装，只包含日报和指令交互需要的几个接口。"""
 
     def __init__(
         self,
@@ -118,6 +118,15 @@ class GitHubClient:
             "POST", f"/repos/{self.repository}/issues/{issue_number}/comments", json={"body": body}
         )
         return self._check(response, "发表评论").json()["id"]
+
+    def add_reaction(self, comment_id: int, content: str) -> None:
+        """给 Issue 评论加表情（eyes、rocket、confused 等）；加过的再加一次不会重复。"""
+        response = self._request(
+            "POST",
+            f"/repos/{self.repository}/issues/comments/{comment_id}/reactions",
+            json={"content": content},
+        )
+        self._check(response, "添加表情")
 
     def close_issue(self, issue_number: int) -> None:
         response = self._request(

@@ -354,6 +354,15 @@ def test_fetch_falls_back_to_abstract() -> None:
 
 
 @respx.mock
+def test_abstract_fallback_keeps_code_links() -> None:
+    respx.get(HTML).mock(return_value=httpx.Response(404))
+    respx.get(PDF).mock(return_value=httpx.Response(404))
+    paper = PAPER.model_copy(update={"abstract": "Code: https://github.com/example/longkv."})
+
+    assert fetcher().fetch(paper).links == ["https://github.com/example/longkv"]
+
+
+@respx.mock
 def test_fetch_waits_between_arxiv_requests(monkeypatch: pytest.MonkeyPatch) -> None:
     sleeps: list[float] = []
     monkeypatch.setattr("gleaner.sources.arxiv.time.sleep", sleeps.append)
