@@ -1,3 +1,5 @@
+import json
+import re
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -97,3 +99,44 @@ class KeywordEmbedder:
         # 最后一维是常数，避免出现零向量
         rows = [[text.lower().count(word) for word in self.vocabulary] + [0.1] for text in texts]
         return normalize(np.asarray(rows, dtype=np.float32))
+
+
+# 与 tests/fixtures/arxiv_rss.xml 中的论文配套的假 LLM 和假嵌入
+PIPELINE_ANCHORS = {
+    "anchors": [
+        {"name": "长上下文推理", "query": "KV cache compression for long-context inference"},
+        {"name": "检索增强生成", "query": "Retrieval augmented generation"},
+        {"name": "医学影像", "query": "Medical imaging", "negative": True},
+    ]
+}
+PIPELINE_VOCABULARY = ["kv cache", "retrieval", "attention", "medical"]
+
+
+def pipeline_llm(scores: dict[str, int]) -> Callable[[dict[str, Any]], str]:
+    """按 prompt 类型分别模拟兴趣拆解、精排和概览三种调用。"""
+
+    def handler(request: dict[str, Any]) -> str:
+        system = request["messages"][0]["content"]
+        prompt = user_prompt(request)
+        if "拆解成若干个具体的子方向" in system:
+            return json.dumps(PIPELINE_ANCHORS, ensure_ascii=False)
+        if "<paper id=" in prompt:
+            ids = re.findall(r'<paper id="([^"]+)">', prompt)
+            results = [
+                {
+                    "id": paper_id,
+                    "score": scores[paper_id],
+                    "matched_interests": ["长上下文推理"],
+                    "reason": f"{paper_id} 与长上下文推理相关",
+                    "tldr": f"{paper_id} 的一句话摘要",
+                    "tags": ["llm"],
+                }
+                for paper_id in ids
+                if paper_id in scores
+            ]
+            return json.dumps({"results": results}, ensure_ascii=False)
+        if "概括今天的整体情况" in prompt:
+            return "今天以长上下文推理为主，建议先读 [1]。"
+        raise AssertionError(f"意外的 prompt：{prompt[:80]}")
+
+    return handler

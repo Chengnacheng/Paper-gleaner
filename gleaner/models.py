@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 from pydantic import BaseModel, Field
 
@@ -36,3 +36,31 @@ class ScoredPaper(Paper):
     reason: str = ""
     tldr: str = ""
     tags: list[str] = Field(default_factory=list)
+
+
+class RunStats(BaseModel):
+    fetched: int = 0
+    duplicates: int = 0
+    excluded: int = 0
+    candidates: int = 0  # 进入精排的篇数
+    selected: int = 0
+    failed_batches: int = 0
+    degraded: bool = False
+    llm_calls: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    duration_seconds: float = 0.0
+
+
+class Digest(BaseModel):
+    """一天的推送结果，保存在 gleaner-data 分支的 history/digests/<日期>.json。"""
+
+    day: date
+    generated_at: datetime
+    overview: str | None = None
+    papers: list[ScoredPaper] = Field(default_factory=list)  # 推送的论文，序号从 1 开始
+    others: list[ScoredPaper] = Field(default_factory=list)  # 精排过但未推送的候选
+    stats: RunStats = Field(default_factory=RunStats)
+    issue_number: int | None = None
+    issue_url: str | None = None
+    comment_ids: dict[str, int] = Field(default_factory=dict)  # 论文 ID → 评论 ID

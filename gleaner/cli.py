@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import sys
-from collections import Counter
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated
+from zoneinfo import ZoneInfo
 
+import httpx
 import typer
 
 from gleaner import __version__
@@ -20,15 +23,22 @@ from gleaner.config import (
     resolve_config_path,
 )
 from gleaner.llm import LLMClient, LLMError
-from gleaner.models import Paper
-from gleaner.pipelines.daily import run_daily
+from gleaner.models import ScoredPaper
+from gleaner.notify import GitHubClient, GitHubError, IssuePublisher
+from gleaner.pipelines.daily import DailyResult, run_daily
+from gleaner.profile import ProfileError
+from gleaner.ranking import EmbeddingError, build_embedder
+from gleaner.render import stats_line
 from gleaner.sources import SourceError
+from gleaner.store import DataBranch, DataBranchError
 
 app = typer.Typer(
     help="Paper Gleaner：fork 即用、零服务器的论文追踪 Agent。",
     no_args_is_help=True,
     add_completion=False,
 )
+
+DEFAULT_DATA_DIR = Path(".gleaner-data")
 
 ConfigOption = Annotated[
     Path | None,
@@ -113,33 +123,57 @@ def check(
         raise typer.Exit(1)
 
 
+# 日报运行中可预期的失败：打印原因后以退出码 1 结束，不打印调用栈
+_DAILY_ERRORS = (
+    ConfigError,
+    ProfileError,
+    LLMError,
+    EmbeddingError,
+    SourceError,
+    GitHubError,
+    DataBranchError,
+    httpx.HTTPError,
+)
+
+
 @app.command()
 def daily(
     config_path: ConfigOption = None,
-    dry_run: Annotated[bool, typer.Option("--dry-run", help="只抓取并打印，不发布")] = False,
-    limit: Annotated[int, typer.Option(min=1, help="dry-run 时最多打印的篇数")] = 20,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="完整运行，但不发布 Issue、不提交数据分支")
+    ] = False,
+    force: Annotated[bool, typer.Option("--force", help="当天日报已存在时仍重新生成")] = False,
+    data_dir: Annotated[
+        Path, typer.Option("--data-dir", help="gleaner-data 分支的本地 worktree 目录")
+    ] = DEFAULT_DATA_DIR,
 ) -> None:
-    """运行每日推送流水线。"""
-    if not dry_run:
-        typer.echo("目前只支持 --dry-run：发布日报将在 Phase 1 实现。", err=True)
-        raise typer.Exit(2)
-
+    """运行每日推送流水线：抓取、筛选、精排，并发布到 GitHub Issue。"""
     _, config = _load(config_path)
+    today = datetime.now(ZoneInfo(config.timezone)).date()
+    branch = DataBranch(Path.cwd(), data_dir)
     try:
-        result = run_daily(config)
-    except SourceError as e:
+        publisher = None if dry_run else _build_publisher(config)
+        llm = LLMClient(config.llm)
+        result = run_daily(
+            config,
+            store=branch.checkout(),
+            llm=llm,
+            embedder=build_embedder(config),
+            today=today,
+            publisher=publisher,
+            force=force,
+        )
+        if not dry_run and result.status != "already_published":
+            branch.commit_and_push(f"data: daily digest {today.isoformat()}")
+    except _DAILY_ERRORS as e:
         typer.echo(f"✗ {e}", err=True)
         raise typer.Exit(1) from e
 
-    if not result.papers:
-        typer.echo("今天没有新公告（arXiv 周末和节假日不更新）。")
-        return
-
-    typer.echo(_summary(result.papers))
-    for index, paper in enumerate(result.papers[:limit], start=1):
-        typer.echo(_format_paper(index, paper))
-    if (hidden := len(result.papers) - limit) > 0:
-        typer.echo(f"… 还有 {hidden} 篇未显示，可用 --limit 调整")
+    report = _report(result)
+    typer.echo(report)
+    if summary_file := os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(summary_file, "a", encoding="utf-8") as f:
+            f.write(f"## Paper Gleaner · {today.isoformat()}\n\n{report}\n")
 
 
 def _load(config_path: Path | None) -> tuple[Path, Config]:
@@ -153,13 +187,50 @@ def _load(config_path: Path | None) -> tuple[Path, Config]:
         raise typer.Exit(1) from e
 
 
-def _summary(papers: list[Paper]) -> str:
-    counts = Counter(paper.announce_type or "unknown" for paper in papers)
-    detail = " · ".join(f"{kind} {count}" for kind, count in counts.most_common())
-    return f"从 arXiv 抓取到 {len(papers)} 篇（{detail}）\n"
+def _build_publisher(config: Config) -> IssuePublisher | None:
+    if not config.notify.github_issue.enabled:
+        return None
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    repository = os.environ.get("GITHUB_REPOSITORY", "").strip()
+    if not token or not repository:
+        raise ConfigError(
+            "发布 Issue 需要 GITHUB_TOKEN 和 GITHUB_REPOSITORY 环境变量"
+            "（GitHub Actions 中自动提供）；本地试运行请加 --dry-run"
+        )
+    api_url = os.environ.get("GITHUB_API_URL", "").strip() or "https://api.github.com"
+    github = GitHubClient(token, repository, api_url=api_url)
+    return IssuePublisher(github, config.notify.github_issue)
 
 
-def _format_paper(index: int, paper: Paper) -> str:
-    authors = ", ".join(paper.authors[:3]) + (" 等" if len(paper.authors) > 3 else "")
-    meta = " · ".join(part for part in (authors, ", ".join(paper.categories)) if part)
-    return f"[{index}] {paper.id}  {paper.title}\n    {meta}"
+def _report(result: DailyResult) -> str:
+    if result.status == "already_published":
+        url = result.existing.url if result.existing else ""
+        return f"今天的日报已经发布：{url}\n如需重新生成，请加 --force。"
+    if result.status == "no_announcements":
+        return "今天没有新公告（arXiv 周末和节假日不更新）。"
+
+    digest = result.digest
+    assert digest is not None
+    lines = []
+    if result.status == "published":
+        lines.append(f"✓ 已发布：{digest.issue_url}")
+    elif result.status == "nothing_relevant":
+        lines.append("今天没有达到 min_score 的论文，未发布日报。")
+    if digest.stats.degraded:
+        lines.append("! LLM 精排没有成功，以下按向量相似度排序。")
+    if digest.overview:
+        lines.append(f"\n{digest.overview}")
+    for index, paper in enumerate(digest.papers, start=1):
+        lines.append("\n" + _format_paper(index, paper))
+    lines.append("\n" + stats_line(digest.stats).replace("<br>", ""))
+    return "\n".join(lines).lstrip("\n")
+
+
+def _format_paper(index: int, paper: ScoredPaper) -> str:
+    score = "—" if paper.llm_score is None else f"{paper.llm_score}/10"
+    lines = [f"[{index}] {score}  {paper.id}  {paper.title}"]
+    if paper.reason:
+        lines.append(f"    🎯 {paper.reason}")
+    if paper.tldr:
+        lines.append(f"    📝 {paper.tldr}")
+    return "\n".join(lines)
