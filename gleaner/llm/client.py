@@ -147,18 +147,29 @@ class LLMClient:
         tier: Tier = "fast",
         json_mode: bool = True,
         max_tokens: int | None = None,
+        temperature: float | None = None,
     ) -> T:
         """请求结构化输出并用 pydantic 校验；不合格时把错误反馈给模型重试一次。
 
         部分推理模型不支持 JSON mode，此时传 ``json_mode=False``，仍会按 Schema 校验。
         """
         schema_json = json.dumps(schema.model_json_schema(), ensure_ascii=False)
-        conversation: list[Message] = [
-            {"role": "system", "content": _JSON_INSTRUCTION.format(schema=schema_json)},
-            *messages,
-        ]
+        instruction = _JSON_INSTRUCTION.format(schema=schema_json)
+        # 合并进调用方的 system 消息：部分服务商不接受多条 system 消息
+        if messages and messages[0]["role"] == "system":
+            system = {"role": "system", "content": f"{messages[0]['content']}\n\n{instruction}"}
+            conversation: list[Message] = [system, *messages[1:]]
+        else:
+            conversation = [{"role": "system", "content": instruction}, *messages]
+
         for attempt in range(2):
-            content = self.chat(conversation, tier=tier, json_mode=json_mode, max_tokens=max_tokens)
+            content = self.chat(
+                conversation,
+                tier=tier,
+                json_mode=json_mode,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
             try:
                 return schema.model_validate_json(_strip_code_fence(content))
             except ValidationError as e:

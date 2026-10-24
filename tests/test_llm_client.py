@@ -146,3 +146,19 @@ def test_builds_openai_client_from_config() -> None:
     assert isinstance(client._client, openai.OpenAI)
     assert str(client._client.base_url).startswith("https://api.example/v1")
     assert client._client.max_retries == 5
+
+
+def test_chat_json_merges_system_prompt() -> None:
+    client, completions = make_client(['{"score": 5, "reason": "ok"}'])
+    messages = [
+        {"role": "system", "content": "你是科研助理。"},
+        {"role": "user", "content": "打分"},
+    ]
+
+    client.chat_json(messages, Verdict, temperature=0.2)
+
+    sent = completions.requests[0]["messages"]
+    assert [m["role"] for m in sent] == ["system", "user"]
+    assert sent[0]["content"].startswith("你是科研助理。")
+    assert "JSON Schema" in sent[0]["content"]
+    assert completions.requests[0]["temperature"] == 0.2
