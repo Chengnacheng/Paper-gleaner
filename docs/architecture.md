@@ -676,7 +676,7 @@ GitHub Actions：公开仓库使用标准 runner 免费；私有仓库每次运�
 | 阶段 | 内容 | 交付与验收 |
 | --- | --- | --- |
 | **Phase 0 骨架** ✅ 已完成 | pyproject 与 uv、配置加载与校验、LLM 客户端（重试与用量统计）、arXiv RSS 抓取、CLI 骨架（`check`、`daily --dry-run`）、`ci.yml` | `gleaner daily --dry-run` 能把抓到的论文打印到终端 |
-| **Phase 1 MVP 日报** ✅ 代码完成，待真实环境验证 | 去重与关键词过滤；兴趣锚点拆解；本地嵌入粗筛；LLM 精排与相关理由；Issue 发布（每篇一条评论）；data 分支存储；`daily.yml` | fork 后配置 Secret 和兴趣描述，手动触发即可收到日报 Issue |
+| **Phase 1 MVP 日报** ✅ 已完成 | 去重与关键词过滤；兴趣锚点拆解；本地嵌入粗筛；LLM 精排与相关理由；Issue 发布（每篇一条评论）；data 分支存储；`daily.yml` | fork 后配置 Secret 和兴趣描述，手动触发即可收到日报 Issue |
 | **Phase 2 交互与深读**（约 1 周） | `interact.yml` 与指令解析；`/deep`（HTML/PDF 获取、代码链接、报告缓存）；`/compare`（多篇对比、单篇与相关工作对比）；`/more`、`/help` | 在日报 Issue 下评论 `/deep 1`，3 分钟内收到报告 |
 | **Phase 3 反馈记忆**（约 1 周） | reaction 同步；`/like`、`/dislike`、`/mute`；反馈锚点参与粗筛；`weekly.yml` 偏好总结 | 连续反馈一周后，`learned_preferences.md` 内容合理，推荐结果有可观察的变化 |
 | **Phase 4 多渠道与生态**（约 1 周） | 邮件、飞书、企业微信；`/ask` Agent；MCP Server；Claude Code Skill；Zotero 可选输入 | 各渠道都能收到推送；在 Claude Code 中可以查询当天推送 |
