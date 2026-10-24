@@ -129,7 +129,7 @@ flowchart TB
 
 ```mermaid
 flowchart LR
-  A["0 同步反馈<br/>拉取 reactions"] --> B["1 抓取<br/>arXiv RSS + API"]
+  A["0 同步反馈<br/>拉取 reactions"] --> B["1 抓取<br/>arXiv RSS"]
   B --> C["2 去重 &<br/>规则过滤"]
   C --> D["3 向量粗筛<br/>Top K = 50"]
   D --> E["4 LLM 精排<br/>打分 + 相关理由<br/>Top N = 10"]
@@ -141,7 +141,7 @@ flowchart LR
 | 步骤 | 说明 |
 | --- | --- |
 | 0. 同步反馈 | 扫描最近 7 天日报 Issue 中每篇论文评论的 reactions，增量写入反馈记录（原因见 [3.4](#34-反馈与记忆)） |
-| 1. 抓取 | 用 arXiv RSS 获取所关注分类当天公告的论文列表（区分 new / cross-list / replace），再用 arXiv API 批量补全元数据。没有新公告（周末、节假日）时直接结束，不发 Issue |
+| 1. 抓取 | 用 arXiv RSS 获取所关注分类当天公告的论文（区分 new / cross / replace / replace-cross）。RSS 条目已包含标题、摘要、作者和分类，无需再调用 API。没有新公告（周末、节假日）时直接结束，不发 Issue |
 | 2. 去重与规则过滤 | 排除已处理过的 ID；默认排除 replace 版本；支持关键词白名单（必推）和黑名单（必不推） |
 | 3. 向量粗筛 | 计算每篇论文与「兴趣锚点」的综合相似度，保留 Top K（默认 50），详见 3.1.1 |
 | 4. LLM 精排 | LLM 分批打分并生成相关理由，保留分数不低于阈值的 Top N（默认 10），详见 3.1.2 |
@@ -342,14 +342,15 @@ gleaner-data/
 
 ```python
 class Paper(BaseModel):
-    id: str                  # arXiv ID，如 "2410.12345"
+    id: str  # arXiv ID，如 "2410.12345"
     title: str
     abstract: str
     authors: list[str]
     categories: list[str]
-    published: datetime
-    url: str
-    pdf_url: str
+    announce_type: str | None  # new / cross / replace / replace-cross
+    announced: datetime | None  # 公告时间
+    # url、pdf_url 由 id 推导，不单独存储
+
 
 class ScoredPaper(Paper):
     coarse_score: float
@@ -359,13 +360,14 @@ class ScoredPaper(Paper):
     tldr: str
     tags: list[str]
 
+
 class Feedback(BaseModel):
     paper_id: str
     title: str
     abstract: str
     signal: Literal["up", "down", "like", "dislike", "deep", "compare"]
     weight: float
-    note: str | None         # /like 或 /dislike 附带的原因
+    note: str | None  # /like 或 /dislike 附带的原因
     source: Literal["reaction", "command"]
     created_at: datetime
 ```
@@ -442,7 +444,7 @@ paper-gleaner/
 | --- | --- | --- |
 | 语言 | Python 3.11+ | 论文处理与 LLM 生态最完善 |
 | 依赖管理 | uv | 在 Actions 中安装快，锁文件可复现 |
-| arXiv 抓取 | arXiv RSS + arXiv API（httpx + feedparser） | RSS 给出当天公告列表，API 补全元数据；遵守 API 请求间隔 3 秒的要求 |
+| arXiv 抓取 | arXiv RSS（httpx + feedparser）；按 ID 查询时用 arXiv API | RSS 给出当天公告列表和元数据；`/deep <arXiv ID>` 等按 ID 查询时调用 API，遵守请求间隔 3 秒的要求 |
 | 嵌入 | fastembed（ONNX）为默认，可切换到 OpenAI 兼容 embeddings API | 不依赖 PyTorch，安装体积小，CPU 推理足够快 |
 | 默认嵌入模型 | `BAAI/bge-small-en-v1.5` | 兴趣锚点已由 LLM 转成英文，英文小模型即可；多语言模型作为可选项 |
 | LLM | `openai` SDK + 自定义 `base_url` | 一套代码适配 DeepSeek、Qwen、Kimi、GLM、OpenAI 等 |
@@ -664,8 +666,8 @@ GitHub Actions：公开仓库使用标准 runner 免费；私有仓库每次运�
 
 | 阶段 | 内容 | 交付与验收 |
 | --- | --- | --- |
-| **Phase 0 骨架**（约 2–3 天） | pyproject 与 uv、配置加载与校验、LLM 客户端（重试与用量统计）、CLI 骨架、`ci.yml` | `gleaner daily --dry-run` 能把抓到的论文打印到终端 |
-| **Phase 1 MVP 日报**（约 1 周） | arXiv 抓取与去重；兴趣锚点拆解；本地嵌入粗筛；LLM 精排与相关理由；Issue 发布（每篇一条评论）；data 分支存储；`daily.yml` | fork 后配置 Secret 和兴趣描述，手动触发即可收到日报 Issue |
+| **Phase 0 骨架** ✅ 已完成 | pyproject 与 uv、配置加载与校验、LLM 客户端（重试与用量统计）、arXiv RSS 抓取、CLI 骨架（`check`、`daily --dry-run`）、`ci.yml` | `gleaner daily --dry-run` 能把抓到的论文打印到终端 |
+| **Phase 1 MVP 日报**（约 1 周） | 去重与关键词过滤；兴趣锚点拆解；本地嵌入粗筛；LLM 精排与相关理由；Issue 发布（每篇一条评论）；data 分支存储；`daily.yml` | fork 后配置 Secret 和兴趣描述，手动触发即可收到日报 Issue |
 | **Phase 2 交互与深读**（约 1 周） | `interact.yml` 与指令解析；`/deep`（HTML/PDF 获取、代码链接、报告缓存）；`/compare`（多篇对比、单篇与相关工作对比）；`/more`、`/help` | 在日报 Issue 下评论 `/deep 1`，3 分钟内收到报告 |
 | **Phase 3 反馈记忆**（约 1 周） | reaction 同步；`/like`、`/dislike`、`/mute`；反馈锚点参与粗筛；`weekly.yml` 偏好总结 | 连续反馈一周后，`learned_preferences.md` 内容合理，推荐结果有可观察的变化 |
 | **Phase 4 多渠道与生态**（约 1 周） | 邮件、飞书、企业微信；`/ask` Agent；MCP Server；Claude Code Skill；Zotero 可选输入 | 各渠道都能收到推送；在 Claude Code 中可以查询当天推送 |
