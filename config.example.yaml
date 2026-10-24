@@ -28,6 +28,7 @@ ranking:
   embedding:
     provider: local                # local（fastembed 本地推理）| api（OpenAI 兼容 embeddings 接口）
     model: BAAI/bge-small-en-v1.5
+    # base_url: https://dashscope.aliyuncs.com/compatible-mode/v1   # provider 为 api 时使用，默认沿用 LLM 的
 
 deep_read:
   auto_top_m: 1                    # 日报中自动深读的篇数，0 表示关闭

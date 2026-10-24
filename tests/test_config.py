@@ -138,3 +138,18 @@ def test_resolve_without_any_config(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     monkeypatch.chdir(tmp_path)
     with pytest.raises(ConfigError, match="config.example.yaml"):
         resolve_config_path()
+
+
+def test_embedding_secrets_from_env(tmp_path: Path) -> None:
+    env = {"EMBEDDING_API_KEY": "sk-embed", "EMBEDDING_BASE_URL": "https://embed.example/v1"}
+    config = load_config(write(tmp_path, "ranking:\n  embedding:\n    provider: api\n"), env=env)
+    embedding = config.ranking.embedding
+    assert embedding.api_key is not None
+    assert embedding.api_key.get_secret_value() == "sk-embed"
+    assert embedding.base_url == "https://embed.example/v1"
+
+
+def test_rejects_embedding_api_key_in_file(tmp_path: Path) -> None:
+    text = "ranking:\n  embedding:\n    api_key: sk-xxx\n"
+    with pytest.raises(ConfigError, match="EMBEDDING_API_KEY"):
+        load_config(write(tmp_path, text), env={})

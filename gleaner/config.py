@@ -72,6 +72,10 @@ class RankingWeights(_Section):
 class EmbeddingConfig(_Section):
     provider: Literal["local", "api"] = "local"
     model: str = "BAAI/bge-small-en-v1.5"
+    # provider 为 api 时使用；未设置时沿用 LLM 的 base_url 和 API Key
+    base_url: str | None = None
+    # 只从环境变量 EMBEDDING_API_KEY 读取
+    api_key: SecretStr | None = Field(default=None, exclude=True)
 
 
 class RankingConfig(_Section):
@@ -178,6 +182,12 @@ def load_config(path: Path, env: Mapping[str, str] | None = None) -> Config:
         raise ConfigError(
             "不要把 API Key 写进配置文件，请改用环境变量 LLM_API_KEY（GitHub Secret）"
         )
+    ranking = raw.get("ranking")
+    embedding = ranking.get("embedding") if isinstance(ranking, dict) else None
+    if isinstance(embedding, dict) and "api_key" in embedding:
+        raise ConfigError(
+            "不要把 API Key 写进配置文件，请改用环境变量 EMBEDDING_API_KEY（GitHub Secret）"
+        )
 
     try:
         config = Config.model_validate(raw)
@@ -206,6 +216,11 @@ def load_config(path: Path, env: Mapping[str, str] | None = None) -> Config:
         model_names = [f"LLM_{tier.upper()}_MODEL", f"{model_prefix}_{tier.upper()}_MODEL"]
         if model := _first_env(env, model_names):
             setattr(config.llm.models, tier, model)
+
+    if api_key := _first_env(env, ["EMBEDDING_API_KEY"]):
+        config.ranking.embedding.api_key = SecretStr(api_key)
+    if base_url := _first_env(env, ["EMBEDDING_BASE_URL"]):
+        config.ranking.embedding.base_url = base_url
     return config
 
 

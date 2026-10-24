@@ -4,10 +4,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import numpy as np
 import pytest
 
 from gleaner.config import LLMConfig
 from gleaner.llm import LLMClient
+from gleaner.ranking.embedder import normalize
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -81,3 +83,17 @@ def fake_llm(
 def user_prompt(request: dict[str, Any]) -> str:
     """取出请求中最后一条用户消息的内容。"""
     return next(m["content"] for m in reversed(request["messages"]) if m["role"] == "user")
+
+
+class KeywordEmbedder:
+    """按关键词出现次数生成向量的假嵌入模型，便于构造可预期的相似度。"""
+
+    def __init__(self, vocabulary: list[str]) -> None:
+        self.vocabulary = vocabulary
+        self.calls: list[list[str]] = []
+
+    def embed(self, texts: list[str]) -> np.ndarray:
+        self.calls.append(texts)
+        # 最后一维是常数，避免出现零向量
+        rows = [[text.lower().count(word) for word in self.vocabulary] + [0.1] for text in texts]
+        return normalize(np.asarray(rows, dtype=np.float32))
