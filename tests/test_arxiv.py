@@ -6,7 +6,7 @@ import respx
 
 from gleaner.config import ArxivConfig
 from gleaner.sources import ArxivSource, SourceError
-from gleaner.sources.arxiv import parse_api, parse_rss
+from gleaner.sources.arxiv import RateLimiter, parse_api, parse_rss
 
 FEED_URL = "https://rss.arxiv.org/rss/cs.CL+cs.LG"
 
@@ -145,3 +145,49 @@ def test_fetch_recent_http_error() -> None:
     respx.get(API_URL).mock(return_value=httpx.Response(503))
     with pytest.raises(SourceError, match="抓取 arXiv API 失败"):
         ArxivSource(ArxivConfig()).fetch_recent(20)
+
+
+@respx.mock
+def test_fetch_by_ids(api_bytes: bytes) -> None:
+    route = respx.get(API_URL).mock(return_value=httpx.Response(200, content=api_bytes))
+
+    papers = ArxivSource(ArxivConfig()).fetch_by_ids(["2610.00001", "2610.00002"])
+
+    assert [p.id for p in papers] == ["2610.00001", "2610.00002"]
+    params = route.calls.last.request.url.params
+    assert params["id_list"] == "2610.00001,2610.00002"
+    assert params["max_results"] == "2"
+    assert "search_query" not in params
+
+
+def test_fetch_by_ids_without_ids_makes_no_request() -> None:
+    assert ArxivSource(ArxivConfig()).fetch_by_ids([]) == []
+
+
+def test_parse_api_skips_error_entries() -> None:
+    # 格式不对的 ID 会得到一条错误条目，它的 id 里也带着像 arXiv ID 的数字
+    content = b"""<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>ArXiv Query: id_list=2610.123456</title>
+  <id>http://arxiv.org/api/abc</id>
+  <entry>
+    <id>http://arxiv.org/api/errors#incorrect_id_format_for_2610.123456</id>
+    <title>Error</title>
+    <summary>incorrect id format for 2610.123456</summary>
+  </entry>
+</feed>"""
+    assert parse_api(content) == []
+
+
+@respx.mock
+def test_api_requests_are_spaced(api_bytes: bytes, monkeypatch: pytest.MonkeyPatch) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("gleaner.sources.arxiv.time.sleep", sleeps.append)
+    respx.get(API_URL).mock(return_value=httpx.Response(200, content=api_bytes))
+    source = ArxivSource(ArxivConfig(), limiter=RateLimiter(3.0))
+
+    source.fetch_by_ids(["2610.00001"])
+    source.fetch_recent(20)
+
+    assert len(sleeps) == 1  # 第一次请求不等待，之后与上一次至少间隔 3 秒
+    assert 2.5 < sleeps[0] <= 3.0

@@ -3,11 +3,16 @@
 arXiv 的 RSS（rss.arxiv.org）每个公告日更新一次，条目里已包含标题、摘要、作者、
 分类和公告类型（new / cross / replace / replace-cross），日报所需的元数据都在其中。
 周末和节假日没有公告时，RSS 不含任何条目；这时试运行改用 arXiv API 取最近提交的论文。
+按 ID 查询（/deep、/compare 中不在日报里的论文）也走 arXiv API。
+
+arXiv 要求 API 请求间隔至少 3 秒；同一进程内对 arxiv.org 的请求（API、HTML 全文、PDF）
+共用一个限速器 ARXIV_RATE_LIMITER。
 """
 
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from time import struct_time
@@ -26,12 +31,32 @@ API_URL = "https://export.arxiv.org/api/query"
 USER_AGENT = f"paper-gleaner/{__version__} (+https://github.com/stanGSA/Paper-gleaner)"
 
 _ID_RE = re.compile(r"(\d{4}\.\d{4,5})(?:v\d+)?")
+# API 条目的 id 是论文链接；出错时是 .../api/errors#...，其中可能也带着一串像 ID 的数字
+_API_ENTRY_ID_RE = re.compile(r"arxiv\.org/abs/(\d{4}\.\d{4,5})(?:v\d+)?$")
 # 摘要前缀形如 "arXiv:2410.12345v1 Announce Type: new \nAbstract: ..."
 _DESCRIPTION_RE = re.compile(
     r"^\s*arXiv:\S+\s+Announce Type:\s*(?P<type>\S+)\s*Abstract:\s*(?P<abstract>.*)$",
     re.DOTALL,
 )
 _REPLACE_TYPES = {"replace", "replace-cross"}
+
+
+class RateLimiter:
+    """保证相邻两次请求之间至少间隔 interval 秒。"""
+
+    def __init__(self, interval: float) -> None:
+        self.interval = interval
+        self._last: float | None = None
+
+    def wait(self) -> None:
+        if self._last is not None:
+            delay = self._last + self.interval - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+        self._last = time.monotonic()
+
+
+ARXIV_RATE_LIMITER = RateLimiter(3.0)
 
 
 class ArxivSource:
@@ -43,10 +68,12 @@ class ArxivSource:
         *,
         client: httpx.Client | None = None,
         timeout: float = 30.0,
+        limiter: RateLimiter = ARXIV_RATE_LIMITER,
     ) -> None:
         self.config = config
         self._client = client
         self._timeout = timeout
+        self._limiter = limiter
 
     @property
     def feed_url(self) -> str:
@@ -64,7 +91,18 @@ class ArxivSource:
             "sortOrder": "descending",
             "max_results": limit,
         }
-        return parse_api(self._download(API_URL, what="arXiv API", params=params))
+        return parse_api(self._api(params))
+
+    def fetch_by_ids(self, ids: list[str]) -> list[Paper]:
+        """按 arXiv ID（不带版本号）查询元数据；arXiv 上不存在的 ID 不会出现在结果里。"""
+        if not ids:
+            return []
+        params = {"id_list": ",".join(ids), "max_results": len(ids)}
+        return parse_api(self._api(params))
+
+    def _api(self, params: dict[str, Any]) -> bytes:
+        self._limiter.wait()
+        return self._download(API_URL, what="arXiv API", params=params)
 
     def _download(self, url: str, *, what: str, params: dict[str, Any] | None = None) -> bytes:
         try:
@@ -119,8 +157,8 @@ def _unique(papers: Iterable[Paper | None]) -> list[Paper]:
 
 def _parse_api_entry(entry: Any) -> Paper | None:
     # 出错时 API 返回一条 id 不是论文链接的条目，这里会被跳过
-    match = _ID_RE.search(entry.get("id", ""))
-    if match is None:
+    match = _API_ENTRY_ID_RE.search(entry.get("id", "").strip())
+    if match is None or not entry.get("title", "").strip():
         return None
     return Paper(
         id=match.group(1),

@@ -7,13 +7,21 @@ from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
+import pymupdf
 import pytest
 
 from gleaner.config import LLMConfig
 from gleaner.llm import LLMClient
 from gleaner.ranking.embedder import normalize
+from gleaner.sources.arxiv import ARXIV_RATE_LIMITER
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+@pytest.fixture(autouse=True)
+def no_arxiv_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    # arXiv 要求请求间隔 3 秒，测试中不等待
+    monkeypatch.setattr(ARXIV_RATE_LIMITER, "interval", 0.0)
 
 
 @pytest.fixture
@@ -29,6 +37,27 @@ def empty_rss_bytes() -> bytes:
 @pytest.fixture
 def api_bytes() -> bytes:
     return (FIXTURES / "arxiv_api.xml").read_bytes()
+
+
+@pytest.fixture
+def html_text() -> str:
+    return (FIXTURES / "arxiv_html.html").read_text(encoding="utf-8")
+
+
+def make_pdf(pages: list[list[str]], links: tuple[str, ...] = ()) -> bytes:
+    """用 PyMuPDF 现场生成 PDF：每个字符串是一个文本块，links 作为第一页的链接注释。"""
+    document = pymupdf.open()
+    for blocks in pages:
+        page = document.new_page()
+        y = 40.0
+        for text in blocks:
+            height = 13.0 * (text.count("\n") + len(text) // 80 + 2)
+            page.insert_textbox(pymupdf.Rect(50, y, 560, y + height), text, fontsize=10)
+            y += height + 6
+    for number, uri in enumerate(links):
+        rect = pymupdf.Rect(50, 700 + number * 12, 300, 710 + number * 12)
+        document[0].insert_link({"kind": pymupdf.LINK_URI, "from": rect, "uri": uri})
+    return document.tobytes()
 
 
 def git(*args: str, cwd: Path) -> str:
