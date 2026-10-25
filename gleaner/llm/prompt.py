@@ -19,6 +19,12 @@ from collections.abc import Iterable
 CHARS_PER_TOKEN = 3.5
 _CJK_RE = re.compile(r"[\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]")
 TRUNCATION_MARK = " …（以下截断）"
+_LANGUAGE_NAMES = {"zh": "简体中文", "en": "English"}
+
+
+def language_name(code: str) -> str:
+    """配置中的输出语言（zh、en）在 prompt 里的写法。"""
+    return _LANGUAGE_NAMES.get(code, code)
 
 
 def estimate_tokens(text: str) -> int:

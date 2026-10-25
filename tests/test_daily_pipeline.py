@@ -12,6 +12,7 @@ from gleaner.models import Digest, Paper, ScoredPaper
 from gleaner.notify import GitHubError, IssueRef
 from gleaner.pipelines.daily import digest_path, run_daily
 from gleaner.profile import (
+    LEARNED_PREFERENCES_PATH,
     ProfileError,
     command_feedback,
     load_feedback,
@@ -479,3 +480,19 @@ def test_muted_description_failure_is_a_warning(
     assert result.status == "preview"
     [warning] = result.warnings
     assert "屏蔽主题「医学影像」的英文描述没有生成" in warning
+
+
+def test_rerank_sees_preferences_and_muted_topics(
+    config: Config, papers: list[Paper], tmp_path: Path
+) -> None:
+    store = DataStore(tmp_path)
+    store.write_text(LEARNED_PREFERENCES_PATH, "<!-- gleaner:note x -->\n### 偏好\n- 有开源代码")
+    store.append_jsonl(MUTED_PATH, [{"action": "mute", "topic": "医学影像", "query": "Medical."}])
+
+    _, fake, _ = run(config, store, papers)
+
+    [rerank_request] = [r for r in fake.requests if "<paper id=" in r["messages"][-1]["content"]]
+    system = rerank_request["messages"][0]["content"]
+    assert "<preferences>\n### 偏好\n- 有开源代码\n</preferences>" in system
+    assert "<muted>\n- 医学影像\n</muted>" in system
+    assert "gleaner:note" not in system

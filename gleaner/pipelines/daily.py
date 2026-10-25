@@ -139,7 +139,7 @@ def run_daily(
         record_seen(store, [p for p in papers if p.id not in seen], today)
 
     anchors = get_anchors(store, interests, llm)
-    # 反馈锚点和屏蔽主题；手改过的屏蔽主题缺少英文描述时在这里补上
+    # 反馈锚点、屏蔽主题和学到的偏好；手改过的屏蔽主题缺少英文描述时在这里补上
     memory = load_memory(store, today)
     warnings += ensure_queries(store, memory.muted, llm)
     ranking = config.ranking
@@ -162,6 +162,8 @@ def run_daily(
         top_n=ranking.final_top_n,
         min_score=ranking.min_score,
         language=config.language,
+        preferences=memory.preferences,
+        muted_topics=[topic.topic for topic in memory.muted],
     )
     overview = summarize(reranked.selected, llm, config.language)
 
