@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import typer
+from pydantic import ValidationError
 
 from gleaner import __version__
 from gleaner.agent import Command, CommandError, Context, Services, execute, latest_digest_day
@@ -26,9 +27,9 @@ from gleaner.config import (
     resolve_config_path,
 )
 from gleaner.llm import LLMClient, LLMError
-from gleaner.models import ScoredPaper
+from gleaner.models import Digest, ScoredPaper
 from gleaner.notify import GitHubClient, GitHubError, IssuePublisher
-from gleaner.pipelines.daily import DailyResult, run_daily
+from gleaner.pipelines.daily import DailyResult, digest_path, run_daily
 from gleaner.pipelines.interact import (
     CommentEvent,
     EventError,
@@ -49,11 +50,11 @@ from gleaner.profile import (
 )
 from gleaner.profile.memory import FEEDBACK_LOOKBACK_MONTHS
 from gleaner.ranking import EmbeddingError, build_embedder
-from gleaner.reader import FulltextFetcher
+from gleaner.reader import FulltextFetcher, report_path
 from gleaner.render import sanitize, stats_line
 from gleaner.render.replies import code, short_error
 from gleaner.sources import ArxivSource, SemanticScholar, SourceError
-from gleaner.store import DataBranch, DataBranchError
+from gleaner.store import DataBranch, DataBranchError, DataStore
 
 app = typer.Typer(
     help="Paper Gleaner：fork 即用、零服务器的论文追踪 Agent。",
@@ -277,6 +278,36 @@ def handle_comment_command(
         raise typer.Exit(1)
 
 
+@app.command("digest")
+def digest_command(
+    day: Annotated[
+        datetime | None,
+        typer.Option("--day", formats=["%Y-%m-%d"], help="哪一天的日报，默认最近一份"),
+    ] = None,
+    show_all: Annotated[bool, typer.Option("--all", help="同时列出打过分但没有推送的候选")] = False,
+    config_path: ConfigOption = None,
+    data_dir: DataDirOption = DEFAULT_DATA_DIR,
+) -> None:
+    """打印某一天推送的论文（默认最近一份），读取 gleaner-data，不修改。"""
+    _load(config_path)
+    store = _read_data(data_dir)
+    target = day.date() if day else latest_digest_day(store)
+    if target is None:
+        typer.echo("✗ gleaner-data 上还没有日报", err=True)
+        raise typer.Exit(1)
+    try:
+        digest = store.read_model(digest_path(target), Digest)
+    except ValidationError as e:
+        typer.echo(f"✗ {digest_path(target)} 格式不正确：{e}", err=True)
+        raise typer.Exit(1) from e
+    if digest is None:
+        latest = latest_digest_day(store)
+        hint = f"，最近一份是 {latest.isoformat()}" if latest else ""
+        typer.echo(f"✗ 没有 {target.isoformat()} 的日报{hint}", err=True)
+        raise typer.Exit(1)
+    typer.echo(_format_digest(digest, store, show_all=show_all))
+
+
 @app.command("deep")
 def deep_command(
     ref: Annotated[str, typer.Argument(help="日报序号、arXiv ID 或 arXiv 链接")],
@@ -378,6 +409,39 @@ def feedback_command(
         raise typer.Exit(1) from e
     memory = load_memory(store, now.astimezone(ZoneInfo(config.timezone)).date())
     typer.echo(_format_memory(memory, now, config.ranking.feedback_half_life_days, days))
+
+
+def _read_data(data_dir: Path) -> DataStore:
+    """同步 gleaner-data 后返回它的目录；同步失败但本地已有数据时用本地的，并给出提示。"""
+    branch = DataBranch(Path.cwd(), data_dir)
+    try:
+        return branch.checkout()
+    except DataBranchError as e:
+        if not (data_dir / ".git").exists():
+            typer.echo(f"✗ {e}", err=True)
+            raise typer.Exit(1) from e
+        typer.echo(f"! 同步 gleaner-data 失败，使用本地已有的数据：{e}", err=True)
+        return DataStore(data_dir)
+
+
+def _format_digest(digest: Digest, store: DataStore, *, show_all: bool) -> str:
+    title = f"📚 {digest.day.isoformat()} 的日报 · 推荐 {len(digest.papers)} 篇"
+    if digest.issue_url:
+        title += f" · {digest.issue_url}"
+    lines = [title]
+    if digest.overview:
+        lines.append(f"\n{digest.overview}")
+    for index, paper in enumerate(digest.papers, start=1):
+        lines += ["", _format_paper(index, paper), f"    {paper.url}"]
+        if store.read_text(report_path(paper.id)) is not None:
+            lines.append(f"    🔍 已有深读报告：gleaner deep {paper.id} 直接读取")
+    if digest.others and show_all:
+        lines.append(f"\n其余 {len(digest.others)} 篇打过分但没有推送的候选：")
+        for index, paper in enumerate(digest.others, start=len(digest.papers) + 1):
+            lines += ["", _format_paper(index, paper), f"    {paper.url}"]
+    elif digest.others:
+        lines.append(f"\n另有 {len(digest.others)} 篇候选没有推送，加 --all 查看。")
+    return "\n".join(lines)
 
 
 def _run_local(

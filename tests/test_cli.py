@@ -691,6 +691,63 @@ def test_local_ask(interact_repo: Path, git_remote: Path, monkeypatch: pytest.Mo
     assert git("rev-parse", "gleaner-data", cwd=git_remote) == before  # 不写数据
 
 
+def test_digest_command(repo: Path, clone: Callable[[str], Path], git_remote: Path) -> None:
+    older = interact_digest(day=date(2026, 10, 20), overview=None, others=[])
+    seed_data(clone, interact_digest(overview="今天以长上下文为主。"), older)
+    before = git("rev-parse", "gleaner-data", cwd=git_remote)
+
+    latest = runner.invoke(app, ["digest"])
+
+    assert latest.exit_code == 0, latest.output
+    output = latest.output
+    assert output.startswith("📚 2026-10-25 的日报 · 推荐 2 篇 · https://github.com/o/r/issues/1")
+    assert "今天以长上下文为主。" in output
+    assert "[1] 9/10  2610.00001  LongKV" in output
+    assert "    https://arxiv.org/abs/2610.00001" in output
+    assert "另有 3 篇候选没有推送，加 --all 查看。" in output
+    assert "Candidate 0" not in output
+
+    everything = runner.invoke(app, ["digest", "--all"])
+    assert "其余 3 篇打过分但没有推送的候选：" in everything.output
+    assert "[3] 5/10  2610.00010  Candidate 0" in everything.output
+    assert "    🎯 候选 0 的理由" in everything.output
+
+    older_day = runner.invoke(app, ["digest", "--day", "2026-10-20"])
+    assert older_day.output.startswith("📚 2026-10-20 的日报")
+    assert "加 --all" not in older_day.output
+
+    missing = runner.invoke(app, ["digest", "--day", "2026-10-01"])
+    assert missing.exit_code == 1
+    assert "没有 2026-10-01 的日报，最近一份是 2026-10-25" in missing.output
+    assert git("rev-parse", "gleaner-data", cwd=git_remote) == before
+
+
+def test_digest_marks_cached_reports_and_works_offline(
+    repo: Path, clone: Callable[[str], Path]
+) -> None:
+    seed_repo = clone("data-seed")
+    seed = DataBranch(seed_repo, seed_repo / ".gleaner-data", backoff_seconds=0)
+    store = seed.checkout()
+    store.write_model(digest_path(DIGEST_DAY), interact_digest())
+    store.write_text("reports/2610.00002.md", "---\npaper_id: 2610.00002\n---\n报告")
+    seed.commit_and_push("data: seed")
+
+    result = runner.invoke(app, ["digest"])
+    assert "    🔍 已有深读报告：gleaner deep 2610.00002 直接读取" in result.output
+
+    git("remote", "set-url", "origin", str(repo.parent / "gone.git"), cwd=repo)
+    offline = runner.invoke(app, ["digest"])
+    assert offline.exit_code == 0, offline.output
+    assert "! 同步 gleaner-data 失败，使用本地已有的数据" in offline.output
+    assert "📚 2026-10-25 的日报" in offline.output
+
+
+def test_digest_without_any_data(repo: Path) -> None:
+    result = runner.invoke(app, ["digest"])
+    assert result.exit_code == 1
+    assert "gleaner-data 上还没有日报" in result.output
+
+
 def test_local_deep_reports_bad_refs(interact_repo: Path) -> None:
     result = runner.invoke(app, ["deep", "9"])
     assert result.exit_code == 1
