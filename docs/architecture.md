@@ -252,9 +252,11 @@ sequenceDiagram
 
 `<ref>` 可以是当天 Issue 中的序号、arXiv ID 或 arXiv 链接。序号按「当前 Issue 对应的那一天」解析，所以在旧日报下评论同样有效。日报推荐的论文编号 1…N，`/more` 列出的候选接着编号 N+1…，同样可以用序号引用。
 
-> 实现状态：Phase 2 实现了 `/deep`、`/compare`、`/more`、`/help`；Phase 3 实现了 `/like`、`/dislike`、`/mute`、`/unmute`；`/ask` 在 Phase 4，在此之前按未知指令处理，回复帮助。
+> 实现状态：Phase 2 实现了 `/deep`、`/compare`、`/more`、`/help`；Phase 3 实现了 `/like`、`/dislike`、`/mute`、`/unmute`；Phase 4 实现了 `/ask`（实现说明见 [13.3](#133-phase-4-实现说明)）。
 
 **为什么 `/deep`、`/compare` 用流水线而 `/ask` 用 Agent**：前两者使用频率高、需要稳定的报告格式和可预期的成本，用固定步骤实现最合适；`/ask` 的问题是开放的，需要模型自己决定查什么，因此使用工具调用循环，最多 8 步并设置 token 上限。
+
+**`/ask` 的循环**（Phase 4）：不用服务商的原生 tool calling，而是一个 JSON 协议——每一步让 deep 档模型输出 `{"action": "call_tool", "tool": ..., "arguments": {...}}` 或 `{"action": "answer"}`，pydantic 校验（工具名只能从已注册的工具中选），工具结果按不可信数据包裹后交给模型；模型决定作答后，再用一次普通对话输出 Markdown 回答。到达步数、token 或时间上限时同样让模型基于已有信息作答，并在回复中注明。上下文只有当前 Issue 中所有者、成员、协作者和机器人自己的评论。
 
 **Agent 工具（全部只读）**
 
@@ -268,7 +270,7 @@ sequenceDiagram
 | `get_profile()` | 读取兴趣描述与学到的偏好 |
 | `search_history(query)` | 在推送过、点赞过的历史论文中检索 |
 
-Agent 没有任何写操作工具。发回复、写反馈这类副作用都由编排代码完成，不由 LLM 决定，从而限制提示注入的影响范围（见 [11](#11-安全与稳健性)）。
+Agent 没有任何写操作工具。发回复、写反馈这类副作用都由编排代码完成，不由 LLM 决定，从而限制提示注入的影响范围（见 [11](#11-安全与稳健性)）。这些工具实现在 `gleaner/agent/tools.py`，`/ask` 和 MCP Server 共用；参数都经过校验（日期、arXiv ID、查询长度），结果截断到约 4000 token。
 
 ### 3.3 深读
 
@@ -424,10 +426,11 @@ paper-gleaner/
 ├── .claude/skills/paper-gleaner/
 │   └── SKILL.md                  # Claude Code Skill
 ├── gleaner/
-│   ├── cli.py                    # typer CLI：check / daily / handle-comment / deep / compare / feedback / summarize-preferences / ...
+│   ├── cli.py                    # typer CLI：check / daily / handle-comment / digest / deep / compare / ask / feedback / summarize-preferences / ...
 │   ├── config.py                 # 读取 config.yaml 与环境变量，pydantic 校验
 │   ├── models.py                 # Paper / ScoredPaper / Digest / Feedback / DeepReport
 │   ├── filters.py                # 去重与关键词过滤
+│   ├── mcp_server.py             # MCP Server（stdio，命令 gleaner-mcp）
 │   ├── pipelines/
 │   │   ├── daily.py
 │   │   ├── interact.py
@@ -469,8 +472,6 @@ paper-gleaner/
 │   └── render/
 │       ├── markdown.py           # 日报的 Markdown 渲染、转义、超长评论拆分
 │       └── replies.py            # 指令回复（深读 / 对比 / 更多候选 / 帮助）的渲染
-├── integrations/mcp_server/
-│   └── server.py                 # MCP Server（stdio）
 ├── profile/
 │   └── interests.example.md
 ├── config.example.yaml
@@ -545,7 +546,11 @@ ranking:
 deep_read:
   auto_top_m: 1                    # 日报中自动深读的篇数，0 表示关闭
   max_input_tokens: 30000
-  timeout_seconds: 180             # 深读、对比单次 LLM 调用的超时
+  timeout_seconds: 180             # 深读、对比、/ask 单次 LLM 调用的超时
+
+ask:
+  max_steps: 8                     # /ask 最多调用几步工具
+  max_tokens: 60000                # 单条 /ask 的 token 上限
 
 llm:
   base_url: https://api.deepseek.com
@@ -680,7 +685,7 @@ concurrency:
 
 两种集成方式共用核心库，适合不同的使用习惯：
 
-- **MCP Server**（`integrations/mcp_server/`）：stdio 模式，本地运行。读取本地 clone 的 data 分支，或通过 GitHub API 读取远端数据。提供的工具：
+- **MCP Server**（`gleaner/mcp_server.py`，命令 `gleaner-mcp`）：stdio 模式，本地运行。读取本地 clone 的 data 分支（每次调用前同步一次远端，同步失败时用本地已有的数据）。提供的工具：
   - `get_digest(date)`：查看某天的推送
   - `search_history(query)`：在历史推送和点赞过的论文中检索
   - `deep_read(arxiv_id)`：深读（优先返回缓存）
@@ -688,9 +693,11 @@ concurrency:
   - `give_feedback(arxiv_id, signal, note?)`：反馈
   - `get_profile()`：查看兴趣画像
 
-  注册方式示例：`claude mcp add paper-gleaner -- uv run gleaner-mcp`
+  注册方式示例：`claude mcp add paper-gleaner -- uv run --directory <仓库路径> --extra mcp gleaner-mcp`
 
-- **Skill**（`.claude/skills/paper-gleaner/SKILL.md`）：告诉 Claude Code 在什么场景下、如何调用 `gleaner` CLI，例如「看看今天推了什么」「深读 2410.12345，再结合我当前的代码库想想怎么用」。不需要额外的服务进程。
+  `mcp` 是可选依赖（`uv sync --extra mcp`），Actions 中的 `uv sync --no-dev` 不会安装它。`give_feedback` 是唯一的写操作：写一条 `/like` 或 `/dislike` 反馈，提交并推送 gleaner-data（需要本地 clone 有推送权限）。
+
+- **Skill**（`.claude/skills/paper-gleaner/SKILL.md`）：告诉 Claude Code 在什么场景下、如何调用 `gleaner` CLI，例如「看看今天推了什么」（`gleaner digest`）、「深读 2410.12345，再结合我当前的代码库想想怎么用」（`gleaner deep`）。不需要额外的服务进程。
 
 ---
 
@@ -702,7 +709,8 @@ concurrency:
 | 他人用表情影响推荐 | 表情只统计仓库所有者（`GITHUB_REPOSITORY_OWNER`）的 👍/👎，协作者、机器人和其他人的都忽略 |
 | 权限过大 | workflow 只申请 `contents: write` 和 `issues: write`；Secrets 只注入到需要的 step |
 | 提示注入（论文正文、评论内容） | 外部内容一律视为数据，在 prompt 中用分隔符包裹；Agent 工具全部只读；发评论、写反馈等副作用由编排代码执行，不由 LLM 决定。反馈原因、屏蔽主题、`learned_preferences.md` 同样按不可信数据包裹；偏好总结的输出只写 `learned_preferences.md` 一个文件，长度不超过 3000 字符，屏蔽主题的英文描述不超过 500 字符 |
-| 成本失控 | 每日 token 预算 `daily_token_budget`，超出后降级（跳过自动深读，`/ask` 暂停服务）；单条指令有 token 上限；`/ask` 最多 8 步 |
+| 成本失控 | 每日 token 预算 `daily_token_budget`，超出后降级（跳过自动深读，`/ask` 暂停服务）；单条指令有 token 上限；`/ask` 最多 8 步（`ask.max_steps`），单条不超过 `ask.max_tokens`，循环超过 10 分钟也停止 |
+| Agent 越权 | `/ask` 的工具全部只读，参数都校验，工具出错时把错误作为结果交给模型；回复经过转义，引用的论文链接由 arXiv ID 拼出。MCP Server 的 `give_feedback` 是唯一的写操作，只追加一条反馈记录，提交说明里不写用户写的原因 |
 | 外部 API 限流 | arXiv API 请求间隔 3 秒；Semantic Scholar 无 key 时共享限额，失败则跳过相关工作部分 |
 | LLM 输出格式错误 | pydantic 校验，失败重试一次，再失败就降级到向量排序 |
 | 重复推送 | 按日期和标签查找当日 Issue，已存在则跳过 |
@@ -741,7 +749,7 @@ GitHub Actions：公开仓库使用标准 runner 免费；私有仓库每次运�
 | **Phase 1 MVP 日报** ✅ 已完成 | 去重与关键词过滤；兴趣锚点拆解；本地嵌入粗筛；LLM 精排与相关理由；Issue 发布（每篇一条评论）；data 分支存储；`daily.yml` | fork 后配置 Secret 和兴趣描述，手动触发即可收到日报 Issue |
 | **Phase 2 交互与深读** ✅ 已实现 | `interact.yml` 与指令解析；`/deep`（HTML/PDF 获取、代码链接、报告缓存）；`/compare`（多篇对比、单篇与相关工作对比）；`/more`、`/help` | 在日报 Issue 下评论 `/deep 1`，3 分钟内收到报告 |
 | **Phase 3 反馈记忆** ✅ 已实现 | reaction 同步；`/like`、`/dislike`、`/mute`、`/unmute`；反馈锚点参与粗筛；`weekly.yml` 偏好总结 | 连续反馈一周后，`learned_preferences.md` 内容合理，推荐结果有可观察的变化 |
-| **Phase 4 多渠道与生态**（约 1 周） | 邮件、飞书、企业微信；`/ask` Agent；MCP Server；Claude Code Skill；Zotero 可选输入 | 各渠道都能收到推送；在 Claude Code 中可以查询当天推送 |
+| **Phase 4 多渠道与生态** ✅ 已实现 | 邮件、飞书、企业微信；日报自动深读；Zotero 可选输入；`/ask` Agent；MCP Server；Claude Code Skill | 各渠道都能收到推送；在 Claude Code 中可以查询当天推送 |
 | **Phase 5 打磨与传播** | 缺少配置时自动创建引导 Issue；完善 README 和截图；建立 Demo 仓库；用一小份人工标注集评估精排 precision@10，据此调整权重和 prompt | 新用户按 README 能在 10 分钟内跑通 |
 
 Phase 1 完成后项目就已经比现有方案好用（可解释的推荐 + 不依赖 Zotero）；Phase 2 带来最主要的差异化（交互式深读）。
@@ -803,6 +811,45 @@ Phase 1 完成后项目就已经比现有方案好用（可解释的推荐 + 不
 - 正文是两个小节的条目列表，每条一句话，括号里写依据。新增条目至少要有两条一致的反馈，或一条带原因的 `/like`、`/dislike`；已有条目只在新反馈明确矛盾时才改动；
 - 模型输出里伪造的 `gleaner:` 注释会被去掉。
 
+### 13.3 Phase 4 实现说明
+
+与上文设计不同或做了取舍的地方：
+
+**`/ask`**
+
+| 项目 | 实现 |
+| --- | --- |
+| 协议 | 不用原生 tool calling（不依赖服务商支持 function calling，推理模型也能用，用假 LLM 也容易测试）。每一步用 `chat_json(json_mode=False)` 让 deep 档模型输出 `AgentStep`：`{"action": "call_tool", "tool": "<工具名>", "arguments": {...}}` 或 `{"action": "answer"}`。工具名是 pydantic 的 `Literal`，只能从已注册的工具中选；不合格时 `chat_json` 把校验错误反馈给模型重试一次；推理模型输出的 `<think>` 思考过程会先去掉 |
+| 作答 | 模型决定作答后，再用一次普通 chat 输出 Markdown，而不是把回答写在 JSON 里：长篇 Markdown 放进 JSON 字符串容易出现转义错误，推理模型在不支持 JSON mode 时更明显；单独一次调用也能用专门的作答提示词约束引用格式（写出 arXiv ID）。代价是多一次调用，但决定作答那一步的输出很短 |
+| 上限 | 最多 `ask.max_steps`（默认 8）步；单条指令的 token（按服务商返回的用量累计）不超过 `ask.max_tokens`（默认 60000）：每一步之前按「已用 + 2 × 当前对话的估算长度 + 3000」判断，保证之后还能作答；整个循环超过 10 分钟也停止。模型连续两次没有输出合格的 JSON 时按到达上限处理。到达上限时用普通 chat 让模型基于已有信息作答，回复开头注明 |
+| 工具 | `agent/tools.py`：表中的七个工具，全部只读。参数用 pydantic 校验（日期 `YYYY-MM-DD`、新式 arXiv ID 或链接、查询不超过 200 字符、不认识的参数报错）；结果截断到约 4000 token（`read_fulltext` 的正文约 3500），按 `<tool_result>` 包裹并声明其中的指令一律忽略。参数不合法、外部服务失败或工具自身出错时，把错误信息作为工具结果交给模型，指令不会崩溃 |
+| `search_arxiv` | arXiv API 的关键词检索：只取查询中的英文单词和数字（最多 12 个），用 `all:` 组合成 AND 查询，按相关度排序，取 8 条；遵守 3 秒的请求间隔 |
+| `search_history` | 关键词检索（不下载嵌入模型）：在 `history/digests` 的全部推荐和候选、以及有反馈的论文中，标题中出现记 3 分，摘要、推荐理由或反馈原因中出现记 1 分，同分时最近的在前，取 10 条 |
+| 上下文 | 只用当前 Issue 的评论（docs 第 15 节）：仓库所有者、成员、协作者（`author_association`）和 `github-actions[bot]` 自己的评论，不含触发指令的那条；每条截断到 1500 字符，总量约 4000 token，放不下时保留新的。读评论失败时不带上下文作答 |
+| 回复 | 模型输出经过 `sanitize_markdown`；回答中出现的 arXiv ID 在末尾列成「提到的论文」，链接由 ID 拼出（标题取自工具结果或当天日报）；末尾注明模型、步数、token 用量和调用过的工具。LLM 失败时回复简短原因 |
+| 指令解析 | 只有 `/ask` 的问题可以写多行（`/ask` 之后的全部内容），其中的 `--force` 等字样不当作参数；问题最多 1000 字 |
+| 本地 | `gleaner ask "<问题>" [--day]`：回答打印到终端，不写数据，不带 Issue 评论上下文 |
+| 超时 | interact.yml 的 `timeout-minutes` 从 15 改为 30 |
+
+**MCP Server**
+
+| 项目 | 实现 |
+| --- | --- |
+| 位置 | 第 5 节原来写的是 `integrations/mcp_server/server.py`，但 hatch 只打包 `gleaner` 这个包，所以放在 `gleaner/mcp_server.py`，入口命令 `gleaner-mcp` |
+| 依赖 | 官方 `mcp` Python SDK（2.x，`MCPServer`），作为可选依赖 `mcp`（`uv run --extra mcp gleaner-mcp`），Actions 中的 `uv sync --no-dev` 不会安装；为了让测试能跑，也放进了 dev 依赖组。没装时 `gleaner-mcp` 提示怎样安装。stdout 是协议通道，提示和日志都写到 stderr |
+| 数据 | 用 `DataBranch` 读取本地 clone 中的 gleaner-data worktree（默认 `.gleaner-data`，`--data-dir` 可以改）。每次调用前同步一次远端；同步失败时用本地已有的数据，并在结果开头注明；本地也没有时报错 |
+| 工具 | `get_digest`、`search_history`、`get_profile` 与 `/ask` 共用 `agent/tools.py`；`deep_read`、`compare` 与本地的 `gleaner deep` / `gleaner compare` 相同：`deep_read` 优先返回缓存，两者都不写缓存、不记隐式反馈（只读）。读工具标注 `readOnlyHint` |
+| `give_feedback` | 唯一的写操作：`signal` 只接受 `like` / `dislike`；先同步，再从历史日报或 arXiv API 补全标题和摘要，经 `profile/memory.py` 写一条反馈（`source` 沿用 `command`，聚合规则不变），然后提交并推送 gleaner-data。推送被拒时按 `DataBranch` 的逻辑 rebase 重试（jsonl 用 union 合并）；仍然失败时丢掉本地那次提交，并明确告诉调用方这条反馈没有保存、需要检查推送权限。提交说明是 `data: /like via MCP`，不写用户写的原因 |
+| 注册 | `claude mcp add paper-gleaner -- uv run --directory <仓库路径> --extra mcp gleaner-mcp`：用 `--directory` 指定仓库，这样在其它项目里使用 Claude Code 时也能找到配置和数据 |
+
+**Claude Code Skill**
+
+| 项目 | 实现 |
+| --- | --- |
+| 文件 | `.claude/skills/paper-gleaner/SKILL.md`：frontmatter 写 `name` 和 `description`（说明什么时候用），正文说明怎样调用 `gleaner` CLI，包括在其它项目里用 `uv run --directory` 调用，以及「深读后结合当前代码库」的做法 |
+| `gleaner digest` | 新增的本地命令：`gleaner digest [--day YYYY-MM-DD] [--all]` 打印某一天的推送（默认最近一份），标出已有深读报告的论文；只读，同步失败时用本地数据。Skill 用它回答「今天推了什么」，不需要 MCP Server |
+| 项目级 Skill | 只在 Paper Gleaner 仓库中打开 Claude Code 时自动加载；想在其它项目中使用，可以把这个目录复制到 `~/.claude/skills/`（README 中说明） |
+
 ---
 
 ## 14. 用户上手流程
@@ -838,7 +885,7 @@ Phase 1 完成后项目就已经比现有方案好用（可解释的推荐 + 不
 | 默认嵌入模型：英文小模型 + LLM 翻译兴趣，还是直接用多语言模型？ | 需要实测召回率和 Actions 耗时后再定 |
 | 日报里是否默认自动深读？ | 默认 1 篇，在成本和体验之间折中 |
 | 是否支持 arXiv 以外的来源（OpenReview、ACL Anthology、bioRxiv）？ | Source 接口预留，v2 再考虑 |
-| `/ask` 是否需要跨天的对话上下文？ | v1 只用当前 Issue 内的评论作为上下文 |
+| `/ask` 是否需要跨天的对话上下文？ | v1 只用当前 Issue 内的评论作为上下文（Phase 4 已实现：只取所有者、成员、协作者和机器人自己的评论，每条截断，总量约 4000 token） |
 
 ---
 
