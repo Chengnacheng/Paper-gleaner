@@ -692,6 +692,18 @@ def test_like_by_arxiv_id(config: Config, store: DataStore) -> None:
     assert feedback_rows(store)[0][:2] == ("2609.99999", "like")
 
 
+@respx.mock
+def test_like_when_arxiv_api_is_down(config: Config, store: DataStore) -> None:
+    respx.get(ARXIV_API).mock(return_value=httpx.Response(503))
+
+    reply, _ = run("/like 2609.99999 经典方法", config, store)
+
+    assert "[2609.99999](https://arxiv.org/abs/2609.99999)，原因：`经典方法`。" in reply
+    assert "> ℹ️ arXiv API 暂时不可用，只记下了论文 ID：这条反馈不参与粗筛" in reply
+    assert "从全文中获取" not in reply
+    assert feedback_rows(store)[0][:4] == ("2609.99999", "like", 2.0, "经典方法")
+
+
 def test_like_without_persist(config: Config, store: DataStore) -> None:
     reply, _ = run("/like 1", config, store, persist=False)
     assert reply.startswith("👍 已记下")

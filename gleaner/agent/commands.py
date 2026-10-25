@@ -348,6 +348,11 @@ def _explicit_feedback(command: Command, ctx: Context, signal: CommandSignal) ->
         raise CommandError(f"用法：`/{signal} <ref> [原因]`，例如 `/{signal} 3 {example}`")
     [paper], notes = resolve_papers([parse_ref(match.group(1))], ctx)
     note = clean_note(match.group(2))
+    if paper.title == paper.id:
+        # arXiv API 不可用：不为一条反馈去下载全文，只记下 ID
+        notes = [
+            "arXiv API 暂时不可用，只记下了论文 ID：这条反馈不参与粗筛，原因仍会进入每周的偏好总结"
+        ]
 
     today = ctx.now.astimezone(ZoneInfo(ctx.config.timezone)).date()
     earlier = [
