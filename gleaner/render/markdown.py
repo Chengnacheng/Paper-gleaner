@@ -11,7 +11,15 @@ import re
 from datetime import date
 from typing import Literal
 
-from gleaner.models import DeepReport, Digest, FeedbackStats, Paper, RunStats, ScoredPaper
+from gleaner.models import (
+    DeepReport,
+    Digest,
+    FeedbackStats,
+    Paper,
+    RunStats,
+    ScoredPaper,
+    ZoteroStats,
+)
 
 TITLE_PREFIX = "📚 Paper Gleaner"
 _ZERO_WIDTH_SPACE = "​"
@@ -141,12 +149,26 @@ def stats_line(stats: RunStats) -> str:
     if stats.failed_batches:
         usage += f" · 精排失败 {stats.failed_batches} 批"
     lines = [funnel, usage]
+    if stats.zotero is not None:
+        lines.append(zotero_line(stats.zotero))
     if stats.deep_read:
         lines.append(f"自动深读 {stats.deep_read} 篇，报告附在对应论文的评论里")
     lines += [f"⚠️ {sanitize(_truncate(note, 200))}" for note in stats.deep_read_notes]
     if not stats.feedback.empty:
         lines += feedback_lines(stats.feedback)
     return "<br>\n".join(lines)
+
+
+def zotero_line(zotero: ZoteroStats) -> str:
+    """如「Zotero：使用 200 / 1342 篇」。只写数量，不列出文献。"""
+    error = sanitize(_truncate(zotero.error or "", 200))
+    if zotero.source == "none":
+        return f"⚠️ Zotero 这次没有使用：{error}"
+    count = f"{zotero.used} / {zotero.total}" if zotero.used < zotero.total else str(zotero.used)
+    line = f"Zotero：使用 {count} 篇"
+    if zotero.source == "stale":
+        line += f"（⚠️ 读取失败，用的是上次的缓存：{error}）"
+    return line
 
 
 def feedback_lines(feedback: FeedbackStats) -> list[str]:

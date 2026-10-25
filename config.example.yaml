@@ -12,8 +12,12 @@ sources:
 
 profile:
   interests_file: profile/interests.md
-  zotero:
-    enabled: false                 # 启用时需要 ZOTERO_ID / ZOTERO_KEY
+  zotero:                          # 可选：把 Zotero 文库作为兴趣锚点（文库内容只缓存在 Actions 缓存里）
+    enabled: false                 # 启用时需要 Secrets ZOTERO_ID / ZOTERO_KEY
+    library_type: user             # user（个人文库，ZOTERO_ID 填用户 ID）| group（群组文库，填群组 ID）
+    collections: []                # 限定范围的 collection，写名称或 key；为空时使用整个文库
+    include_subcollections: true   # 是否包含子 collection
+    max_items: 200                 # 最多取多少篇：按加入时间从新到旧，在各 collection 之间轮流取
 
 filters:
   include_keywords: []             # 命中即进入精排

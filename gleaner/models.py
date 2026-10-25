@@ -31,11 +31,13 @@ class ScoredPaper(Paper):
 
     coarse_score: float | None = None
     coarse_match: str | None = None  # 向量最接近的兴趣子方向
-    # 粗筛分数的分项（docs 3.1.1）：coarse_score = 兴趣 + 正反馈 - 负反馈，都已乘过权重。
-    # 没有正反馈锚点时 positive_score 为 None，没有负向锚点时 negative_score 为 None
+    # 粗筛分数的分项（docs 3.1.1）：coarse_score = 兴趣 + 正反馈 + Zotero - 负反馈，都已乘过权重。
+    # 没有正反馈锚点时 positive_score 为 None，没有负向锚点时 negative_score 为 None，
+    # 没有使用 Zotero 时 zotero_score 为 None
     interest_score: float | None = None
     positive_score: float | None = None
     negative_score: float | None = None
+    zotero_score: float | None = None
     forced: bool = False  # 命中 include_keywords，跳过了粗筛
     llm_score: int | None = None  # 0–10；None 表示精排失败或未精排
     matched_interests: list[str] = Field(default_factory=list)
@@ -66,6 +68,17 @@ class FeedbackStats(BaseModel):
         return self == FeedbackStats()
 
 
+class ZoteroStats(BaseModel):
+    """Zotero 锚点（A4）的使用情况，显示在「本次运行」中。只记数量，不记文献标题。"""
+
+    used: int = 0  # 参与粗筛的篇数
+    total: int = 0  # 读取范围内的有效文献数（去掉附件、笔记、回收站条目和重复项）
+    # api：重新拉取；cache：文库没有变化（304），用了缓存；stale：读取失败，用了旧缓存；
+    # none：读取失败又没有缓存，这次没有使用
+    source: Literal["api", "cache", "stale", "none"] = "api"
+    error: str | None = None
+
+
 class RunStats(BaseModel):
     fetched: int = 0
     duplicates: int = 0
@@ -79,6 +92,7 @@ class RunStats(BaseModel):
     completion_tokens: int = 0
     duration_seconds: float = 0.0
     feedback: FeedbackStats = Field(default_factory=FeedbackStats)
+    zotero: ZoteroStats | None = None  # 没有启用 Zotero 时为 None
     deep_read: int = 0  # 自动深读的篇数（报告附在论文评论里）
     deep_read_notes: list[str] = Field(default_factory=list)  # 没有自动深读的原因，如超出预算
 

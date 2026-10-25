@@ -62,6 +62,7 @@ from gleaner.reader import FulltextFetcher
 from gleaner.render import sanitize, stats_line
 from gleaner.render.replies import code, short_error
 from gleaner.sources import ArxivSource, SemanticScholar, SourceError
+from gleaner.sources.zotero import ZoteroLibrary
 from gleaner.store import DataBranch, DataBranchError
 
 app = typer.Typer(
@@ -154,6 +155,9 @@ def check(
     channel_lines, channel_problems = _channel_status(config)
     typer.echo("\n".join(channel_lines))
     problems += channel_problems
+    zotero_line, zotero_problem = _zotero_status(config)
+    typer.echo(zotero_line)
+    problems += zotero_problem
 
     if ping_llm and config.llm.api_key is not None:
         client = LLMClient(config.llm)
@@ -196,6 +200,26 @@ def _channel_status(config: Config) -> tuple[list[str], int]:
     if any(getattr(notify, channel).enabled for channel in CHANNELS):
         lines.append("  运行 gleaner notify-test 给已启用的渠道各发一条测试消息")
     return lines, problems
+
+
+def _zotero_status(config: Config) -> tuple[str, int]:
+    """Zotero 的配置状态（不请求 Zotero；collection 名称在运行日报时才解析）。"""
+    zotero = config.profile.zotero
+    missing = [
+        name
+        for name, value in (("ZOTERO_ID", zotero.library_id), ("ZOTERO_KEY", zotero.api_key))
+        if value is None
+    ]
+    if not zotero.enabled:
+        return "· Zotero：未启用", 0
+    if missing:
+        return f"✗ Zotero：已启用，但缺少环境变量 {'、'.join(missing)}（GitHub Secret）", 1
+    library = "群组文库" if zotero.library_type == "group" else "个人文库"
+    scope = "整个文库"
+    if zotero.collections:
+        scope = "collection " + "、".join(zotero.collections)
+        scope += "（含子 collection）" if zotero.include_subcollections else "（不含子 collection）"
+    return f"✓ Zotero：{library}，范围：{scope}，最多取 {zotero.max_items} 篇作为锚点", 0
 
 
 def _channel_detail(config: Config, channel: str) -> str:
@@ -257,6 +281,7 @@ def daily(
             reactions=reactions,
             owner=owner,
             notifiers=notifiers,
+            zotero=ZoteroLibrary(config.profile.zotero) if config.profile.zotero.enabled else None,
             force=force,
             sample_size=DRY_RUN_SAMPLE_SIZE if dry_run else None,
         )
@@ -665,12 +690,14 @@ def _format_paper(index: int, paper: ScoredPaper) -> str:
 
 
 def score_breakdown(paper: ScoredPaper) -> str:
-    """粗筛分数的分项，如「粗筛 0.912 = 兴趣 0.850 + 正反馈 0.120 − 负向 0.058」。"""
+    """粗筛分数的分项，如「粗筛 0.952 = 兴趣 0.850 + 正反馈 0.120 + Zotero 0.040 − 负向 0.058」。"""
     if paper.coarse_score is None or paper.interest_score is None:
         return ""
     text = f"粗筛 {paper.coarse_score:.3f} = 兴趣 {paper.interest_score:.3f}"
     if paper.positive_score is not None:
         text += f" + 正反馈 {paper.positive_score:.3f}"
+    if paper.zotero_score is not None:
+        text += f" + Zotero {paper.zotero_score:.3f}"
     if paper.negative_score is not None:
         text += f" − 负向 {paper.negative_score:.3f}"
     return text

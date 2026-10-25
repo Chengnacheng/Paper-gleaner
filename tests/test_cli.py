@@ -868,3 +868,70 @@ def test_daily_dry_run_auto_deep_reads_first_paper(
     assert "    🔍 已自动深读：报告附在评论里，并写入 reports/2610.00001.md" in result.output
     assert "自动深读 1 篇，报告附在对应论文的评论里" in result.output
     assert "LLM 调用 4 次" in result.output
+
+
+ZOTERO_API = "https://api.zotero.org/users/1234567"
+
+
+@respx.mock
+def test_daily_dry_run_with_zotero(
+    repo: Path, rss_bytes: bytes, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (repo / "config.yaml").write_text(
+        REPO_CONFIG + "profile:\n  zotero: {enabled: true, max_items: 2}\n"
+    )
+    monkeypatch.setenv("ZOTERO_ID", "1234567")
+    monkeypatch.setenv("ZOTERO_KEY", "zotero-key-xyz")
+    cache = tmp_path / "zotero-cache"
+    monkeypatch.setenv("GLEANER_ZOTERO_CACHE", str(cache))
+    items = [
+        {
+            "key": f"ITEM000{i}",
+            "version": 3,
+            "data": {
+                "key": f"ITEM000{i}",
+                "itemType": "journalArticle",
+                "title": f"My library paper on attention {i}",
+                "abstractNote": "Attention kernels.",
+                "collections": [],
+                "dateAdded": f"2026-10-0{i + 1}T00:00:00Z",
+            },
+        }
+        for i in range(3)
+    ]
+    headers = {"Total-Results": "3", "Last-Modified-Version": "42"}
+    respx.get(f"{ZOTERO_API}/items/top").mock(
+        return_value=httpx.Response(200, json=items, headers=headers)
+    )
+    respx.get(RSS_URL).mock(return_value=httpx.Response(200, content=rss_bytes))
+
+    result = runner.invoke(app, ["daily", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "Zotero：使用 2 / 3 篇" in result.output
+    assert "+ Zotero " in result.output
+    assert "My library paper" not in result.output
+    assert "zotero-key-xyz" not in result.output and "1234567" not in result.output
+    assert list(cache.glob("library-*.json"))
+    data = repo / ".gleaner-data"
+    for path in data.rglob("*"):
+        if path.is_file() and ".git" not in path.parts:
+            assert "My library paper" not in path.read_text(encoding="utf-8"), path
+
+
+def test_check_reports_zotero(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (workdir / "config.yaml").write_text(
+        "profile:\n  zotero:\n    enabled: true\n    library_type: group\n"
+        "    collections: [Detection]\n"
+    )
+    result = runner.invoke(app, ["check"])
+    assert "✗ Zotero：已启用，但缺少环境变量 ZOTERO_ID、ZOTERO_KEY" in result.output
+
+    monkeypatch.setenv("ZOTERO_ID", "7654321")
+    monkeypatch.setenv("ZOTERO_KEY", "zotero-key-xyz")
+    result = runner.invoke(app, ["check"])
+    assert (
+        "✓ Zotero：群组文库，范围：collection Detection（含子 collection），最多取 200 篇作为锚点"
+        in result.output
+    )
+    assert "7654321" not in result.output

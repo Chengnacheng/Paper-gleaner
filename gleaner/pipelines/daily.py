@@ -1,7 +1,9 @@
 """每日推送流水线（docs/architecture.md 3.1）。
 
-同步表情 → 抓取 → 去重与关键词过滤 → 向量粗筛 → LLM 精排 → 生成概览 → 自动深读前 M 篇
-→ 发布 Issue → 推送到邮件、飞书、企业微信 → 写入 gleaner-data。
+同步表情 → 抓取 → 去重与关键词过滤 → 向量粗筛（可选加入 Zotero 锚点）→ LLM 精排 → 生成概览
+→ 自动深读前 M 篇 → 发布 Issue → 推送到邮件、飞书、企业微信 → 写入 gleaner-data。
+
+Zotero 文库只在本机缓存，读取失败时用旧缓存或跳过，不影响日报；digest 和统计里只有数量。
 
 自动深读（deep_read.auto_top_m，默认 1 篇）用 deep 档模型，报告以折叠块附在论文评论里，同时写入
 reports/ 缓存，之后 /deep 直接返回缓存。获取全文或 LLM 失败、剩余 token 预算不够时跳过，
@@ -41,6 +43,7 @@ from gleaner.ranking import Embedder, coarse_rank, rerank, summarize
 from gleaner.reader import FulltextFetcher, deep_read, load_report, save_report
 from gleaner.render.markdown import kilo
 from gleaner.sources import ArxivSource, Source
+from gleaner.sources.zotero import ZoteroResult
 from gleaner.store import DataStore
 
 Status = Literal[
@@ -68,6 +71,12 @@ class Publisher(Protocol):
     def repair(self, digest: Digest, reports: Mapping[str, DeepReport] | None = None) -> Digest: ...
 
     def close_stale(self, now: datetime | None = None) -> list[int]: ...
+
+
+class ZoteroSource(Protocol):
+    def load(self) -> ZoteroResult:
+        """读取 Zotero 锚点；失败时降级，不抛出异常。"""
+        ...
 
 
 @dataclass
@@ -117,6 +126,7 @@ def run_daily(
     owner: str | None = None,
     notifiers: Sequence[Notifier] = (),
     fetcher: FulltextFetcher | None = None,
+    zotero: ZoteroSource | None = None,
     force: bool = False,
     sample_size: int | None = None,
     now: datetime | None = None,
@@ -126,6 +136,7 @@ def run_daily(
     reactions、owner：从哪里读取论文评论的表情、只统计谁的；没有时跳过表情同步。
     notifiers：发布后推送摘要的渠道（邮件、飞书、企业微信），dry-run 时为空。
     fetcher：自动深读时获取全文，默认直接请求 arXiv。
+    zotero：启用 Zotero 时读取文库锚点（A4）。
     sample_size：没有新公告时，改用最近提交的这么多篇论文（不去重、不记录为已处理）。
     只在没有发布渠道时生效，用于周末等时候试运行、检查配置。
     """
@@ -168,6 +179,9 @@ def run_daily(
     # 反馈锚点、屏蔽主题和学到的偏好；手改过的屏蔽主题缺少英文描述时在这里补上
     memory = load_memory(store, today)
     warnings += ensure_queries(store, memory.muted, llm)
+    library = zotero.load() if zotero is not None else None
+    if library is not None:
+        warnings += library.warnings
     ranking = config.ranking
     candidates = coarse_rank(
         filtered.papers,
@@ -179,6 +193,7 @@ def run_daily(
         memory=memory,
         half_life_days=ranking.feedback_half_life_days,
         now=now,
+        zotero=library.papers if library is not None else (),
     )
     reranked = rerank(
         candidates,
@@ -227,6 +242,7 @@ def run_daily(
             feedback=memory.stats(now, ranking.feedback_half_life_days).model_copy(
                 update={"synced": sync.records, "sync_error": sync.error}
             ),
+            zotero=library.stats if library is not None else None,
             deep_read=len(reports),
             deep_read_notes=deep_read_notes,
         ),

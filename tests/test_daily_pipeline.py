@@ -8,7 +8,7 @@ import pytest
 from gleaner.config import Config
 from gleaner.filters import record_seen
 from gleaner.llm import LLMError
-from gleaner.models import DeepReport, Digest, Paper, ScoredPaper
+from gleaner.models import DeepReport, Digest, Paper, ScoredPaper, ZoteroStats
 from gleaner.notify import GitHubError, IssueRef
 from gleaner.notify.base import NotifyError
 from gleaner.pipelines.daily import digest_path, run_daily
@@ -23,6 +23,7 @@ from gleaner.profile import (
 from gleaner.profile.muted import MUTED_PATH
 from gleaner.reader import FullText, Section, load_report, save_report
 from gleaner.sources.arxiv import parse_rss
+from gleaner.sources.zotero import ZoteroResult
 from gleaner.store import DataStore
 from tests.conftest import (
     DEEP_REPORT,
@@ -813,3 +814,63 @@ def test_fallback_run_reattaches_cached_report(
     assert result.status == "repaired"
     assert fake.requests == [] and fetcher.calls == []  # 不重新生成
     assert publisher.reports[0]["2610.00001"].body == DEEP_REPORT
+
+
+# --- Zotero ---------------------------------------------------------------------
+
+
+class FakeZotero:
+    def __init__(self, result: ZoteroResult) -> None:
+        self.result = result
+        self.calls = 0
+
+    def load(self) -> ZoteroResult:
+        self.calls += 1
+        return self.result
+
+
+def test_zotero_anchors_join_coarse_ranking(
+    config: Config, papers: list[Paper], tmp_path: Path
+) -> None:
+    store = DataStore(tmp_path)
+    private = "Secret Zotero Paper About Attention Kernels"
+    library = ZoteroResult(
+        papers=[Paper(id="zotero:ABCD2345", title=private, abstract="Attention, attention.")],
+        stats=ZoteroStats(used=1, total=1342, source="api"),
+    )
+
+    result, _, _ = run(config, store, papers, zotero=FakeZotero(library), publisher=FakePublisher())
+
+    by_id = {p.id: p for p in [*result.digest.papers, *result.digest.others]}
+    attention = by_id["2610.00003"]
+    assert attention.zotero_score > by_id["2610.00002"].zotero_score
+    assert result.digest.stats.zotero == ZoteroStats(used=1, total=1342, source="api")
+    # 文库内容不写进 gleaner-data：只有数量
+    for path in tmp_path.rglob("*"):
+        if path.is_file():
+            text = path.read_text(encoding="utf-8")
+            assert private not in text and "ABCD2345" not in text, path
+
+
+def test_zotero_failure_is_a_warning(config: Config, papers: list[Paper], tmp_path: Path) -> None:
+    library = ZoteroResult(
+        stats=ZoteroStats(source="none", error="请求 Zotero 失败（ConnectError）"),
+        warnings=[
+            "读取 Zotero 失败，又没有缓存，这次不使用 Zotero：请求 Zotero 失败（ConnectError）"
+        ],
+    )
+
+    result, _, _ = run(config, DataStore(tmp_path), papers, zotero=FakeZotero(library))
+
+    assert result.status == "preview"
+    assert result.warnings == library.warnings
+    assert all(p.zotero_score is None for p in result.digest.papers)
+    assert result.digest.stats.zotero.source == "none"
+
+
+def test_without_zotero_stats_are_empty(
+    config: Config, papers: list[Paper], tmp_path: Path
+) -> None:
+    result, _, _ = run(config, DataStore(tmp_path), papers)
+    assert result.digest.stats.zotero is None
+    assert all(p.zotero_score is None for p in result.digest.papers)
