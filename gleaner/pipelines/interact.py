@@ -14,6 +14,7 @@ import json
 import logging
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -184,6 +185,8 @@ def handle_comment(
                 issue_number=event.issue_number,
                 persist=persist,
                 now=now or datetime.now(UTC),
+                comments=_comment_reader(replier, event.issue_number),
+                comment_id=event.comment_id,
             )
             body = execute(command, ctx)
     except UnknownCommandError as e:
@@ -258,6 +261,17 @@ def _reject(
     _react(replier, event.comment_id, "confused")
     first_line = body.splitlines()[0] if body else ""
     return InteractResult("rejected", command, reply_ids, first_line)
+
+
+def _comment_reader(
+    replier: Replier, issue_number: int
+) -> Callable[[], list[dict[str, Any]]] | None:
+    """/ask 的上下文：用到时才读取 Issue 的评论（GitHubClient.list_comments 返回的评论
+    带有 author_association）；试运行时的 replier 不能读评论，返回 None。"""
+    list_comments = getattr(replier, "list_comments", None)
+    if not callable(list_comments):
+        return None
+    return lambda: list_comments(issue_number)
 
 
 def _react(replier: Replier, comment_id: int, content: str) -> None:

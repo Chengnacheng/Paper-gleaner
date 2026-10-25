@@ -1,6 +1,7 @@
 """Issue 评论指令的解析与分发（docs/architecture.md 3.2）。
 
-指令写在评论第一行，例如 "/deep 3 --force"、"/compare 3 5"、"/like 3 有开源代码"、"/mute 医学影像"。
+指令写在评论第一行，例如 "/deep 3 --force"、"/compare 3 5"、"/like 3 有开源代码"、"/mute 医学影像"；
+只有 /ask 的问题可以写多行（"/ask" 之后的全部内容都是问题）。
 <ref> 支持三种写法：当前 Issue 中的序号、arXiv ID（可带版本号）、arXiv 链接。
 序号按这个 Issue 对应的那一天解析，所以在旧日报下评论同样有效；
 日报推荐的论文编号 1…N，/more 列出的候选接着编号 N+1…。
@@ -17,6 +18,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from functools import cached_property
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
@@ -53,6 +55,8 @@ from gleaner.reader import (
     save_report,
 )
 from gleaner.render.replies import (
+    ask_fallback_reply,
+    ask_reply,
     code,
     compare_fallback_reply,
     compare_reply,
@@ -71,9 +75,10 @@ from gleaner.render.replies import (
 from gleaner.sources import ArxivSource, SemanticScholar, SourceError
 from gleaner.store import DataStore
 
-COMMANDS = ("deep", "compare", "more", "like", "dislike", "mute", "unmute", "help")
+COMMANDS = ("deep", "compare", "more", "like", "dislike", "mute", "unmute", "ask", "help")
 DEFAULT_MORE = 5
 MAX_MORE = 20
+MAX_QUESTION_CHARS = 1_000
 
 _FORCE_FLAGS = {"--force", "-f"}
 # 参数之间可以用空格、逗号或顿号分隔："/compare 3 5"、"/compare 3,5"、"/compare 3、5"
@@ -109,7 +114,8 @@ class Command:
     name: str
     args: tuple[str, ...] = ()
     force: bool = False
-    # 指令名之后的原文（第一行）：/like 的原因、/mute 的主题取自这里，保留其中的标点和空格
+    # 指令名之后的原文（/ask 是之后的全部内容，其它指令只取第一行）：
+    # /like 的原因、/mute 的主题、/ask 的问题取自这里，保留其中的标点和空格
     rest: str = field(default="", compare=False)
 
     @property
@@ -138,6 +144,9 @@ class Context:
     issue_number: int | None = None
     persist: bool = True  # 写入报告缓存、反馈和屏蔽主题；本地调试时为 False
     now: datetime = field(default_factory=lambda: datetime.now(UTC))
+    # 读取当前 Issue 的评论，作为 /ask 的上下文；None 表示没有（本地运行）
+    comments: Callable[[], list[dict[str, Any]]] | None = None
+    comment_id: int | None = None  # 触发指令的那条评论，不放进上下文
 
     @cached_property
     def llm(self) -> LLMClient:
@@ -173,6 +182,9 @@ def parse_command(body: str) -> Command:
     name, rest = match.group(1).lower(), match.group(2).strip()
     if name not in COMMANDS:
         raise UnknownCommandError(name)
+    if name == "ask":
+        # 问题里可能有 --force 之类的字样，不当作参数
+        return Command(name, (), False, "\n".join([rest, *lines[1:]]).strip())
     tokens = [token for token in _ARG_SEPARATOR.split(rest) if token]
     force = any(token.lower() in _FORCE_FLAGS for token in tokens)
     args = tuple(token for token in tokens if token.lower() not in _FORCE_FLAGS)
@@ -214,6 +226,7 @@ def execute(command: Command, ctx: Context) -> str:
         "dislike": _dislike,
         "mute": _mute,
         "unmute": _unmute,
+        "ask": _ask,
         "help": _help,
     }
     return handlers[command.name](command, ctx)
@@ -408,6 +421,38 @@ def _unmute(command: Command, ctx: Context) -> str:
         )
     remaining = [item.topic for item in muted if item is not existing]
     return unmute_reply(existing.topic, remaining)
+
+
+def _ask(command: Command, ctx: Context) -> str:
+    """/ask <问题>：deep 档模型用只读工具查资料后作答（agent/loop.py）。"""
+    # loop 依赖 tools，tools 又依赖本模块：用到时再导入，避免循环导入
+    from gleaner.agent.loop import ask
+
+    question = command.rest.strip()
+    if not question:
+        raise CommandError(
+            "用法：`/ask <问题>`，例如 `/ask 今天哪篇的方法最适合用在单源域泛化的检测器上？`"
+        )
+    if len(question) > MAX_QUESTION_CHARS:
+        raise CommandError(
+            f"问题太长（{len(question)} 个字）：请精简到 {MAX_QUESTION_CHARS} 个字以内"
+        )
+    try:
+        result = ask(question, ctx)
+    except LLMError as e:
+        logger.warning("/ask 失败：%s", e)
+        return ask_fallback_reply(question, error=e)
+    return ask_reply(
+        question,
+        result.answer,
+        model=result.model,
+        steps=result.steps,
+        max_steps=result.max_steps,
+        tokens=result.tokens,
+        tool_calls=result.tool_calls,
+        cited=result.cited,
+        note=result.limit_note,
+    )
 
 
 def resolve_papers(refs: list[Ref], ctx: Context) -> tuple[list[Paper], list[str]]:

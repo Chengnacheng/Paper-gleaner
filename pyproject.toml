@@ -21,9 +21,16 @@ dependencies = [
 
 [project.scripts]
 gleaner = "gleaner.cli:app"
+gleaner-mcp = "gleaner.mcp_server:main"
+
+[project.optional-dependencies]
+mcp = [
+    "mcp>=2.3",
+]
 
 [dependency-groups]
 dev = [
+    "mcp>=2.3",
     "pytest>=8.0",
     "respx>=0.21",
     "ruff>=0.6",

@@ -42,6 +42,7 @@ HELP = """\
 | `/dislike <ref> [原因]` | 不喜欢这篇论文，之后少推荐类似的 |
 | `/mute <主题>` | 屏蔽一个主题，如 `/mute 医学影像`；不带参数时列出已屏蔽的主题 |
 | `/unmute <主题>` | 取消屏蔽 |
+| `/ask <问题>` | 自由提问：Agent 会查日报、读全文、检索 arXiv 和你的历史后作答，最多 8 步 |
 | `/help` | 显示本帮助 |
 
 `<ref>` 可以是本 Issue 中的序号（如 `3`）、arXiv ID（如 `2410.12345`，版本号会被忽略）\
@@ -305,6 +306,53 @@ def muted_topics_text(muted: Sequence[str]) -> str:
     if not muted:
         return "当前没有屏蔽任何主题"
     return "当前屏蔽的主题：" + "、".join(code(topic) for topic in muted)
+
+
+# --- /ask -----------------------------------------------------------------------
+
+
+def ask_reply(
+    question: str,
+    answer: str,
+    *,
+    model: str,
+    steps: int,
+    max_steps: int,
+    tokens: int,
+    tool_calls: Sequence[str],
+    cited: Sequence[tuple[str, str]],
+    note: str | None = None,
+) -> str:
+    """/ask 的回答：模型输出经过 sanitize_markdown，引用的论文另外给出 arXiv 链接。
+
+    cited 是回答中出现的 arXiv ID 及其标题；链接由 ID 拼出，不用模型写的链接。
+    """
+    lines = [f"## 💬 /ask · {code(question, limit=80)}", ""]
+    if note:
+        lines += [f"> ℹ️ {sanitize(note)}", ""]
+    lines += [sanitize_markdown(answer), ""]
+    papers = [(paper_id, title) for paper_id, title in cited if _ARXIV_ID_RE.match(paper_id)]
+    if papers:
+        lines += ["**提到的论文**", ""]
+        lines += [
+            f"- {paper_link(Paper(id=paper_id, title=title, abstract=''))}（{paper_id}）"
+            for paper_id, title in papers
+        ]
+        lines.append("")
+    usage = [f"模型 {sanitize(model)}", f"{steps} 步（上限 {max_steps}）", f"token {kilo(tokens)}"]
+    if tool_calls:
+        usage.append("工具：" + "、".join(tool_calls))
+    lines += ["---", f"<sub>{' · '.join(usage)}</sub>"]
+    return "\n".join(lines)
+
+
+def ask_fallback_reply(question: str, *, error: object) -> str:
+    """回答没有生成（LLM 调用失败）。"""
+    return (
+        f"## 💬 /ask · {code(question, limit=80)}\n\n"
+        f"> ⚠️ 回答没有生成：{short_error(error)}\n\n"
+        "稍后可以再评论一次 `/ask` 重试。"
+    )
 
 
 # --- 公用片段 -------------------------------------------------------------------

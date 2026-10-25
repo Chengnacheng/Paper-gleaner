@@ -9,7 +9,7 @@
 - 支持邮件、飞书、企业微信推送，以及 Claude Code Skill/MCP；
 - 适配 DeepSeek、Qwen 等低价模型。
 
-> 项目处于早期开发阶段：每日日报（Phase 1）、Issue 指令交互（Phase 2）、反馈学习（Phase 3），以及邮件 / 飞书 / 企业微信推送、日报自动深读和 Zotero 输入（Phase 4 上半部分）已可用；`/ask`、MCP、Claude Code Skill 还在开发中。总体架构与实施路线见 [docs/architecture.md](docs/architecture.md)。
+> 项目处于早期开发阶段：每日日报（Phase 1）、Issue 指令交互（Phase 2）、反馈学习（Phase 3），以及邮件 / 飞书 / 企业微信推送、日报自动深读、Zotero 输入、`/ask`、MCP Server 和 Claude Code Skill（Phase 4）都已可用。总体架构与实施路线见 [docs/architecture.md](docs/architecture.md)。
 
 ## 在 GitHub Actions 上使用
 
@@ -93,6 +93,7 @@ profile:
 | `/dislike <ref> [原因]` | `/dislike 5 纯 benchmark` | 不喜欢这篇论文：之后少推荐类似的；会覆盖之前对同一篇的 `/like` |
 | `/mute <主题>` | `/mute 医学影像` | 屏蔽一个主题，之后把这类论文排到后面；只写 `/mute` 时列出已屏蔽的主题 |
 | `/unmute <主题>` | `/unmute 医学影像` | 取消屏蔽 |
+| `/ask <问题>` | `/ask 今天哪篇的方法最适合用在单源域泛化的检测器上？` | 自由提问：deep 档模型自己决定查当天日报、读全文、检索 arXiv 和你的历史，最多 8 步后作答，回复中列出提到的论文的链接，并注明步数和 token 用量 |
 | `/help` | | 列出可用指令 |
 
 - `<ref>` 可以是本 Issue 中的序号、arXiv ID（可带版本号，如 `2410.12345v2`）或 arXiv 链接。序号按 Issue 对应的那一天解析，在旧日报下评论同样有效；`/more` 列出的候选接着日报往下编号（日报有 6 篇时，候选从 7 开始）。
@@ -100,6 +101,7 @@ profile:
 - `/deep`、`/compare` 使用 deep 档模型，单条指令的输入不超过 `deep_read.max_input_tokens`（默认 30000）。可选添加 Secret `S2_API_KEY` 提高 Semantic Scholar 的请求限额；没有时偶尔会被限流，回复中会注明缺少相关工作部分。
 - 外部服务失败时指令不会失败：拿不到全文就基于摘要分析，LLM 调用失败就先回复摘要和代码链接。
 - 日报自动深读过的论文（默认排在第一的那篇），报告折叠在它的评论里，`/deep` 直接返回这份缓存。
+- `/ask` 的问题可以写多行；它只读当前 Issue 中你和协作者的评论（以及机器人自己的回复）作为上下文，工具全部只读。步数和单条 token 上限在 `config.yaml` 的 `ask` 中设置（默认 8 步、60000 token），到达上限时会基于已经查到的信息作答并注明。
 
 ## 反馈与记忆
 
@@ -115,6 +117,34 @@ Paper Gleaner 会根据你的反馈调整推荐，所有记忆都以文件形式
 - **每天（向量层）**：同一篇论文的反馈合成一个分数（表情取最新状态，`/like`/`/dislike` 取最新一条，`/deep`/`/compare` 最多 +0.5，三者相加），正的作为正反馈锚点、负的和屏蔽主题作为负向锚点，参与粗筛打分；反馈越新、越多、越一致，影响越大（时间衰减的半衰期是 `ranking.feedback_half_life_days`，默认 90 天）。没有任何反馈时和以前完全一样。
 - **每周（语义层）**：Weekly preferences 让 fast 模型把新反馈和原因增量总结进 `gleaner-data` 上的 `profile/learned_preferences.md`，例如「偏好有开源代码的工作（3 次 /like 提到）」，精排时会参考它。没有新反馈时不调用 LLM；你可以直接编辑或删除其中的条目，下次总结会在你修改后的内容上调整。`profile/interests.md` 永远由你自己写，程序不会改它。
 - **怎么看效果**：日报 Issue 末尾「本次运行」里有反馈统计（👍、👎、`/like`、`/dislike` 各多少篇，正负反馈锚点和屏蔽主题各多少）；`gleaner daily --dry-run` 会打印每篇论文粗筛分数的分项（兴趣 + 正反馈 − 负向）；本地运行 `gleaner feedback` 可以查看聚合后的反馈、屏蔽的主题和学到的偏好。
+
+## 在 Claude Code 中使用
+
+两种方式都在本地运行、读取仓库的 `gleaner-data` 分支，可以任选其一，也可以都用。下面的 `<仓库路径>` 是你 clone 下来的 Paper Gleaner 仓库；用到 `deep`、`compare`、`ask` 时需要在仓库根目录的 `.env` 中写好 `LLM_API_KEY`（见[本地开发](#本地开发)）。
+
+**Skill（不需要额外进程）**：仓库自带 `.claude/skills/paper-gleaner/SKILL.md`。在仓库目录中打开 Claude Code，直接问「今天推了什么」「深读 2410.12345，再结合我当前的代码库想想怎么用」，Claude Code 会调用 `gleaner digest`、`gleaner deep` 等命令。想在其它项目里也能用，把这个目录复制到 `~/.claude/skills/paper-gleaner/`，并在其中写明仓库路径。
+
+**MCP Server**：
+
+```bash
+cd <仓库路径> && uv sync --extra mcp     # mcp 是可选依赖，GitHub Actions 中不会安装
+claude mcp add paper-gleaner -- uv run --directory <仓库路径> --extra mcp gleaner-mcp
+```
+
+注册后在 Claude Code 中可以直接问「今天推了什么」「帮我找找之前推过的域泛化论文」。提供的工具：
+
+| 工具 | 说明 |
+| --- | --- |
+| `get_digest(date?)` | 某一天的推送，默认最近一份 |
+| `search_history(query)` | 用英文关键词在推送过的、有反馈的论文中检索 |
+| `deep_read(arxiv_id, force?)` | 深读，已有报告时直接返回缓存（不写缓存） |
+| `compare(ids)` | 对比论文；一篇时与相关工作对比 |
+| `give_feedback(arxiv_id, signal, note?)` | 记下 `like` / `dislike`（可附原因），**会提交并推送到 gleaner-data** |
+| `get_profile()` | 兴趣描述、学到的偏好和屏蔽的主题 |
+
+- 每次调用前先同步远端的 `gleaner-data`（本地 worktree 在 `.gleaner-data`，`--data-dir` 可以改）；同步失败时用本地已有的数据，并在结果中注明；
+- `give_feedback` 需要这个本地 clone 能推送到 GitHub（`git push` 能成功，例如用 SSH 或配置了凭据的 HTTPS）。推送失败时会明确告诉你这条反馈没有保存；
+- 只读的工具不会修改任何数据。
 
 ## 本地开发
 
@@ -133,6 +163,8 @@ uv run gleaner notify-test                # 给已启用的推送渠道各发一
 uv run gleaner deep 2410.12345            # 本地深读，报告打印到终端（读取但不写入报告缓存）
 uv run gleaner deep 1 --day 2026-10-25    # 序号按某一天的日报解析，默认最近一份
 uv run gleaner compare 1 2                # 本地对比；只给一篇时与相关工作对比
+uv run gleaner digest                     # 打印最近一份日报；--day 2026-10-25 指定日期，--all 连同候选
+uv run gleaner ask "今天哪篇最适合我的检测器？"   # 本地 /ask，回答打印到终端（不写数据）
 uv run gleaner handle-comment --event event.json --dry-run   # 用 issue_comment 事件文件调试，只打印回复
 uv run gleaner feedback --days 30         # 查看聚合后的反馈、屏蔽的主题和学到的偏好（只读）
 uv run gleaner summarize-preferences --dry-run   # 把新反馈总结成学到的偏好，只打印不提交
@@ -148,10 +180,13 @@ uv run pytest
 ```text
 gleaner/
 ├── cli.py                   # 命令行入口
+├── mcp_server.py            # MCP Server（gleaner-mcp）
 ├── config.py                # 配置加载与校验
 ├── models.py                # 数据模型
 ├── filters.py               # 去重与关键词过滤
 ├── agent/commands.py        # Issue 指令的解析与分发
+├── agent/tools.py           # Agent 的只读工具（/ask 和 MCP Server 共用）
+├── agent/loop.py            # /ask 的 JSON 协议工具调用循环
 ├── llm/client.py            # OpenAI 兼容 LLM 客户端：模型分级、用量统计与预算、结构化输出
 ├── llm/prompt.py            # token 估算、不可信内容的包裹
 ├── notify/github_issue.py   # 发布日报 Issue、回复评论、添加和读取表情

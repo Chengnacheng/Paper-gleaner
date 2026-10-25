@@ -8,6 +8,7 @@ token 用量统计与预算，以及结构化输出的校验和重试。
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeVar
 
@@ -20,6 +21,7 @@ Tier = Literal["fast", "deep"]
 Message = dict[str, str]
 T = TypeVar("T", bound=BaseModel)
 
+_THINK_RE = re.compile(r"\A\s*<think>.*?</think>", re.DOTALL)
 _JSON_INSTRUCTION = (
     "请只输出一个 JSON 对象，不要输出任何解释或 Markdown 代码块。"
     "JSON 必须符合以下 JSON Schema：\n{schema}"
@@ -154,6 +156,7 @@ class LLMClient:
         json_mode: bool = True,
         max_tokens: int | None = None,
         temperature: float | None = None,
+        timeout: float | None = None,
     ) -> T:
         """请求结构化输出并用 pydantic 校验；不合格时把错误反馈给模型重试一次。
 
@@ -175,6 +178,7 @@ class LLMClient:
                 json_mode=json_mode,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                timeout=timeout,
             )
             try:
                 return schema.model_validate_json(_strip_code_fence(content))
@@ -193,8 +197,8 @@ class LLMClient:
 
 
 def _strip_code_fence(text: str) -> str:
-    """去掉模型有时会包在 JSON 外面的 ``` 代码块标记。"""
-    text = text.strip()
+    """去掉推理模型输出的 <think> 思考过程，以及有时会包在 JSON 外面的 ``` 代码块标记。"""
+    text = _THINK_RE.sub("", text).strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1] if "\n" in text else ""
         text = text.removesuffix("```").strip()
