@@ -140,7 +140,7 @@ flowchart LR
 
 | 步骤 | 说明 |
 | --- | --- |
-| 0. 同步反馈 | 扫描最近 7 天日报 Issue 中每篇论文评论的 reactions，增量写入反馈记录（原因见 [3.4](#34-反馈与记忆)） |
+| 0. 同步反馈 | 扫描最近 7 天日报 Issue 中每篇论文评论的 reactions，增量写入反馈记录（原因见 [3.4](#34-反馈与记忆)）。只统计仓库所有者的 👍/👎；失败时日报照常运行，只给出警告 |
 | 1. 抓取 | 用 arXiv RSS 获取所关注分类当天公告的论文（区分 new / cross / replace / replace-cross）。RSS 条目已包含标题、摘要、作者和分类，无需再调用 API。没有新公告（周末、节假日）时直接结束，不发 Issue |
 | 2. 去重与规则过滤 | 排除已处理过的 ID；默认排除 replace 版本；支持关键词白名单（必推）和黑名单（必不推） |
 | 3. 向量粗筛 | 计算每篇论文与「兴趣锚点」的综合相似度，保留 Top K（默认 50），详见 3.1.1 |
@@ -171,9 +171,26 @@ score(p) = w_interest · max_i cos(p, A1_i)
 
 冷启动时只有 A1；反馈越多，A2/A3 的影响越大。
 
+Phase 3 的具体定义（A4 还没有接入）：
+
+```text
+score(p) = w_interest · max_i cos(p, A1_i)
+         + w_pos      · mean_top3_j (d_j · cos(p, A2_j))
+         − w_neg      · max_k (d_k · cos(p, A3_k))
+
+d = 信号强度 × 0.5^(距最近一次有效反馈的天数 / feedback_half_life_days)
+信号强度 = min(|有效反馈| / 2, 1)：一次 /like 或 /dislike 为 1，一个 👍/👎 为 0.5，只有 /deep 为 0.25
+```
+
+- **mean_top3**：先把每个正反馈锚点的相似度乘上它的权重 d，取最大的 3 个求平均，不足 3 个按 0 计。一两次反馈只有部分影响，同一方向的反馈越多、越新，影响越大，不会因为点了一个 👍 就让推荐跑偏；
+- **A3** 包括兴趣描述中明确不感兴趣的方向（权重 1）、`/mute` 的屏蔽主题（用英文检索描述生成向量，权重 1，不衰减）和负反馈论文（权重同上），取加权后最接近的一个；
+- 每类反馈锚点最多取权重最高的 200 篇；只有 arXiv ID、没有标题和摘要的反馈（arXiv API 不可用时记下的）不参与；
+- 没有任何反馈和屏蔽主题时，分数与只用 A1 时完全相同；
+- 每篇候选都记录分项（`interest_score`、`positive_score`、`negative_score`，均已乘过权重），`gleaner daily --dry-run` 会打印出来，用来观察反馈是否生效。
+
 #### 3.1.2 LLM 精排
 
-- **输入**：用户画像（`interests.md` + 学到的偏好 `learned_preferences.md`）+ 一批论文（每批 10 篇，包含标题、摘要、分类）。
+- **输入**：用户画像（`interests.md` + 学到的偏好 `learned_preferences.md` + 屏蔽的主题）+ 一批论文（每批 10 篇，包含标题、摘要、分类）。学到的偏好和屏蔽主题都可能被用户手改，按不可信数据包裹；两者都没有时 prompt 与只用兴趣描述时完全相同。
 - **输出**：结构化 JSON，用 pydantic 校验：
 
 ```json
@@ -229,12 +246,13 @@ sequenceDiagram
 | `/more [n]` | `/more 5` | 展开当天未入选的候选（直接读精排结果，不再调用 LLM） | 读缓存 |
 | `/like <ref> [原因]` | `/like 3 有开源代码，方法简单` | 显式正反馈，带原因的反馈价值最高 | 写反馈 |
 | `/dislike <ref> [原因]` | `/dislike 7 纯 benchmark` | 显式负反馈 | 写反馈 |
-| `/mute <主题>` | `/mute 医学影像` | 屏蔽某个主题，作为负向锚点 | 写画像 |
+| `/mute <主题>` | `/mute 医学影像` | 屏蔽某个主题，作为负向锚点；不带参数时列出已屏蔽的主题 | 写画像 |
+| `/unmute <主题>` | `/unmute 医学影像` | 取消屏蔽 | 写画像 |
 | `/help` | | 列出指令 | — |
 
 `<ref>` 可以是当天 Issue 中的序号、arXiv ID 或 arXiv 链接。序号按「当前 Issue 对应的那一天」解析，所以在旧日报下评论同样有效。日报推荐的论文编号 1…N，`/more` 列出的候选接着编号 N+1…，同样可以用序号引用。
 
-> 实现状态：Phase 2 实现了 `/deep`、`/compare`、`/more`、`/help`；`/like`、`/dislike`、`/mute` 在 Phase 3，`/ask` 在 Phase 4。在此之前它们按未知指令处理，回复帮助。
+> 实现状态：Phase 2 实现了 `/deep`、`/compare`、`/more`、`/help`；Phase 3 实现了 `/like`、`/dislike`、`/mute`、`/unmute`；`/ask` 在 Phase 4，在此之前按未知指令处理，回复帮助。
 
 **为什么 `/deep`、`/compare` 用流水线而 `/ask` 用 Agent**：前两者使用频率高、需要稳定的报告格式和可预期的成本，用固定步骤实现最合适；`/ask` 的问题是开放的，需要模型自己决定查什么，因此使用工具调用循环，最多 8 步并设置 token 上限。
 
@@ -265,7 +283,7 @@ Agent 没有任何写操作工具。发回复、写反馈这类副作用都由�
 1. 切分章节，按优先级保留：Abstract、Introduction、Method、Experiments、Conclusion 优先；References 和大部分 Appendix 跳过；
 2. 截断到 token 预算（默认约 30k）。v1 单次调用；遇到超长论文再考虑按章节 map-reduce；
 3. 代码链接：从正文正则提取 GitHub、GitLab、Hugging Face 链接，并查询 Hugging Face Papers 上关联的代码仓库（Phase 2 暂未接入，见 13.1）；
-4. 相关工作：通过 Semantic Scholar API 获取参考文献和推荐论文，再与用户历史（推送过、点赞过的论文）做向量近邻检索（与历史的近邻检索留到 Phase 3）。
+4. 相关工作：通过 Semantic Scholar API 获取参考文献和推荐论文，再与用户历史（推送过、点赞过的论文）做向量近邻检索（与历史的近邻检索还没有做，见 13.2）。
 
 **报告模板**
 
@@ -294,10 +312,22 @@ Agent 没有任何写操作工具。发回复、写反馈这类副作用都由�
 
 > **注意：GitHub 的 reaction 不会触发 Actions 事件。** 因此 reaction 采用「拉取」方式：每日任务开始时扫描最近 7 天的日报评论，读取 reactions 并增量写入。显式指令（`/like` 等）则会立即生效。
 
+**聚合规则**（Phase 3 实现）：同一篇论文可能有很多条反馈记录，读取时先按 `created_at` 排序（union 合并后行序不可靠），再合成一个「有效反馈」：
+
+| 分项 | 规则 | 取值 |
+| --- | --- | --- |
+| 表情 | 只看这篇论文最新的一条表情记录 | +1、−1 或 0（撤销） |
+| 显式反馈 | `/like`、`/dislike` 以最新一条为准 | +2 或 −2 |
+| 隐式反馈 | 有过 `/deep` 或 `/compare` 就算，做多少次都只算一次 | +0.5 |
+
+三者相加：为正进入 A2，为负进入 A3，为 0 不参与。例如 👍 后又 `/dislike` 为 −1（负反馈），`/deep` 了三次再点 👎 为 −0.5。
+
+**表情同步**：只统计仓库所有者（`GITHUB_REPOSITORY_OWNER`，不区分大小写）的 👍/👎。一篇论文的状态是「有 👍 为 +1、有 👎 为 −1、两个都点了为 0」，同一篇论文出现在多份日报里时合并计算。每次同步把状态与该论文最新一条表情记录比较，只追加有变化的：新的状态写成 `weight` 为 +1 / −1 的记录，撤销写成 `weight=0` 的记录（`signal` 为被撤销的那个表情）。同一个表情每天都会读到，但不会重复写入，聚合时也只取最新状态，不会重复计数。超过 7 天的日报不再同步，之后的撤销不会被看到。
+
 **两层记忆**
 
 1. **向量层（自动、快速）**：反馈论文的向量直接作为正/负锚点参与粗筛打分（见 3.1.1），每天生效。
-2. **语义层（较慢、人可读）**：每周一次，或新增反馈达到 N 条时，由 LLM 把反馈记录及其原因总结成 `learned_preferences.md`，例如「偏好有开源代码的工作」「对纯 benchmark 论文兴趣低」。这份文件会注入精排 prompt。总结时把当前文件一并作为输入，要求增量修改，而不是每次重写。
+2. **语义层（较慢、人可读）**：每周一次，或新增反馈达到 N 条时，由 LLM 把反馈记录及其原因总结成 `learned_preferences.md`，例如「偏好有开源代码的工作」「对纯 benchmark 论文兴趣低」。这份文件会注入精排 prompt。总结时把当前文件一并作为输入，要求增量修改，而不是每次重写。（Phase 3 只做了每周一次，文件格式见 13.2。）
 
 **边界**：用户手写的 `interests.md` 优先级最高，LLM 永远不改动它，只写 `learned_preferences.md`。用户可以直接编辑或删除其中的条目；由于所有记忆都在 git 中，「撤销一次学习」就是一次 `git revert`。
 
@@ -324,7 +354,7 @@ gleaner-data/
 ├── profile/
 │   ├── anchors.json              # 兴趣描述拆解出的子方向和英文检索描述（含源文件 hash）
 │   ├── learned_preferences.md    # LLM 总结的偏好（用户可编辑）
-│   └── muted.json                # /mute 的主题
+│   └── muted.jsonl               # /mute、/unmute 事件，只追加，回放得到当前的屏蔽列表
 ├── feedback/
 │   └── 2026-10.jsonl             # 按月分片，只追加
 ├── history/
@@ -339,7 +369,7 @@ gleaner-data/
 ```
 
 - **向量不入库**：模型权重和近期论文向量用 `actions/cache` 缓存，丢失后可以重算。反馈记录本身保存标题和摘要，反馈论文的向量（通常只有几百条）每次重算的成本可以忽略。
-- **并发写入**：推送被拒时先 rebase 远端再重试。`.jsonl` 文件配置 `merge=union`，两个任务同时追加同一文件时会自动合并，不会产生冲突。
+- **并发写入**：推送被拒时先 rebase 远端再重试。`.jsonl` 文件配置 `merge=union`，两个任务同时追加同一文件时会自动合并，不会产生冲突。反馈和屏蔽主题都是只追加的 jsonl；唯一会被整体改写的 `learned_preferences.md` 只由 weekly 写入，rebase 冲突（例如这期间用户在 gleaner-data 上手改了它）时放弃本次写入并报错，不会覆盖用户的修改。
 
 **核心数据模型（示意）**
 
@@ -358,6 +388,9 @@ class Paper(BaseModel):
 class ScoredPaper(Paper):
     coarse_score: float | None
     coarse_match: str | None  # 向量最接近的兴趣子方向
+    interest_score: float | None  # 粗筛分项：兴趣、正反馈、负向（Phase 3）
+    positive_score: float | None
+    negative_score: float | None
     forced: bool  # 命中 include_keywords，跳过了粗筛
     llm_score: int | None  # None 表示精排失败或未精排
     matched_interests: list[str]
@@ -371,7 +404,7 @@ class Feedback(BaseModel):
     title: str
     abstract: str
     signal: Literal["up", "down", "like", "dislike", "deep", "compare"]
-    weight: float
+    weight: float  # 表情记录为同步时的状态：+1、−1、0（撤销）
     note: str | None  # /like 或 /dislike 附带的原因
     source: Literal["reaction", "command"]
     created_at: datetime
@@ -391,14 +424,14 @@ paper-gleaner/
 ├── .claude/skills/paper-gleaner/
 │   └── SKILL.md                  # Claude Code Skill
 ├── gleaner/
-│   ├── cli.py                    # typer CLI：check / daily / handle-comment / deep / compare / ...
+│   ├── cli.py                    # typer CLI：check / daily / handle-comment / deep / compare / feedback / summarize-preferences / ...
 │   ├── config.py                 # 读取 config.yaml 与环境变量，pydantic 校验
 │   ├── models.py                 # Paper / ScoredPaper / Digest / Feedback / DeepReport
 │   ├── filters.py                # 去重与关键词过滤
 │   ├── pipelines/
 │   │   ├── daily.py
 │   │   ├── interact.py
-│   │   └── feedback.py
+│   │   └── feedback.py           # 日报第 0 步：同步表情
 │   ├── sources/
 │   │   ├── base.py               # Source 协议，方便以后接入 OpenReview 等
 │   │   ├── arxiv.py
@@ -406,7 +439,8 @@ paper-gleaner/
 │   │   └── zotero.py
 │   ├── profile/
 │   │   ├── anchors.py            # 兴趣描述 → 子方向 / 检索描述
-│   │   └── memory.py             # 反馈读写、偏好总结
+│   │   ├── memory.py             # 反馈读写与聚合、偏好总结
+│   │   └── muted.py              # 屏蔽主题（/mute、/unmute）
 │   ├── ranking/
 │   │   ├── embedder.py           # fastembed 本地 / OpenAI 兼容 embeddings API
 │   │   ├── coarse.py             # 向量粗筛
@@ -422,7 +456,8 @@ paper-gleaner/
 │   │   ├── tools.py              # Agent 工具（只读）
 │   │   └── loop.py               # /ask 的工具调用循环
 │   ├── llm/
-│   │   └── client.py             # OpenAI 兼容客户端、重试、token 统计与预算
+│   │   ├── client.py             # OpenAI 兼容客户端、重试、token 统计与预算
+│   │   └── prompt.py             # token 估算、不可信内容的包裹（各处 prompt 共用）
 │   ├── notify/
 │   │   ├── base.py               # Notifier 接口
 │   │   ├── github_issue.py
@@ -606,6 +641,26 @@ jobs:
 
 每周运行一次：把近期反馈总结进 `learned_preferences.md`；可选生成一份周报 Issue（本周高分论文和兴趣变化）。
 
+```yaml
+on:
+  schedule:
+    - cron: "30 12 * * 0"     # 北京时间周日 20:30，赶在周一的日报之前
+  workflow_dispatch:
+    inputs:
+      dry_run: {type: boolean, default: false}   # 只打印总结结果，不提交数据分支
+
+permissions:
+  contents: write              # 只写 gleaner-data 分支
+
+concurrency:
+  group: gleaner-weekly
+  cancel-in-progress: false
+```
+
+- 运行 `gleaner summarize-preferences`，git 身份与 `daily.yml` 相同；
+- 没有新反馈时不调用 LLM；LLM 失败时保留原文件，以退出码 1 结束；
+- Phase 3 没有做周报 Issue，也没有做「新增反馈达到 N 条时触发」。
+
 ---
 
 ## 9. 推送渠道
@@ -644,8 +699,9 @@ jobs:
 | 风险 | 对策 |
 | --- | --- |
 | 他人评论消耗 API 额度 | 只响应 OWNER / MEMBER / COLLABORATOR 的评论 |
+| 他人用表情影响推荐 | 表情只统计仓库所有者（`GITHUB_REPOSITORY_OWNER`）的 👍/👎，协作者、机器人和其他人的都忽略 |
 | 权限过大 | workflow 只申请 `contents: write` 和 `issues: write`；Secrets 只注入到需要的 step |
-| 提示注入（论文正文、评论内容） | 外部内容一律视为数据，在 prompt 中用分隔符包裹；Agent 工具全部只读；发评论、写反馈等副作用由编排代码执行，不由 LLM 决定 |
+| 提示注入（论文正文、评论内容） | 外部内容一律视为数据，在 prompt 中用分隔符包裹；Agent 工具全部只读；发评论、写反馈等副作用由编排代码执行，不由 LLM 决定。反馈原因、屏蔽主题、`learned_preferences.md` 同样按不可信数据包裹；偏好总结的输出只写 `learned_preferences.md` 一个文件，长度不超过 3000 字符，屏蔽主题的英文描述不超过 500 字符 |
 | 成本失控 | 每日 token 预算 `daily_token_budget`，超出后降级（跳过自动深读，`/ask` 暂停服务）；单条指令有 token 上限；`/ask` 最多 8 步 |
 | 外部 API 限流 | arXiv API 请求间隔 3 秒；Semantic Scholar 无 key 时共享限额，失败则跳过相关工作部分 |
 | LLM 输出格式错误 | pydantic 校验，失败重试一次，再失败就降级到向量排序 |
@@ -684,7 +740,7 @@ GitHub Actions：公开仓库使用标准 runner 免费；私有仓库每次运�
 | **Phase 0 骨架** ✅ 已完成 | pyproject 与 uv、配置加载与校验、LLM 客户端（重试与用量统计）、arXiv RSS 抓取、CLI 骨架（`check`、`daily --dry-run`）、`ci.yml` | `gleaner daily --dry-run` 能把抓到的论文打印到终端 |
 | **Phase 1 MVP 日报** ✅ 已完成 | 去重与关键词过滤；兴趣锚点拆解；本地嵌入粗筛；LLM 精排与相关理由；Issue 发布（每篇一条评论）；data 分支存储；`daily.yml` | fork 后配置 Secret 和兴趣描述，手动触发即可收到日报 Issue |
 | **Phase 2 交互与深读** ✅ 已实现 | `interact.yml` 与指令解析；`/deep`（HTML/PDF 获取、代码链接、报告缓存）；`/compare`（多篇对比、单篇与相关工作对比）；`/more`、`/help` | 在日报 Issue 下评论 `/deep 1`，3 分钟内收到报告 |
-| **Phase 3 反馈记忆**（约 1 周） | reaction 同步；`/like`、`/dislike`、`/mute`；反馈锚点参与粗筛；`weekly.yml` 偏好总结 | 连续反馈一周后，`learned_preferences.md` 内容合理，推荐结果有可观察的变化 |
+| **Phase 3 反馈记忆** ✅ 已实现 | reaction 同步；`/like`、`/dislike`、`/mute`、`/unmute`；反馈锚点参与粗筛；`weekly.yml` 偏好总结 | 连续反馈一周后，`learned_preferences.md` 内容合理，推荐结果有可观察的变化 |
 | **Phase 4 多渠道与生态**（约 1 周） | 邮件、飞书、企业微信；`/ask` Agent；MCP Server；Claude Code Skill；Zotero 可选输入 | 各渠道都能收到推送；在 Claude Code 中可以查询当天推送 |
 | **Phase 5 打磨与传播** | 缺少配置时自动创建引导 Issue；完善 README 和截图；建立 Demo 仓库；用一小份人工标注集评估精排 precision@10，据此调整权重和 prompt | 新用户按 README 能在 10 分钟内跑通 |
 
@@ -703,14 +759,49 @@ Phase 1 完成后项目就已经比现有方案好用（可解释的推荐 + 不
 | token 预算 | 没有分词器，按字符数估算：英文约 3.5 个字符一个 token（偏保守），中日韩字符每字 1 个 token。单条指令的全部输入不超过 `deep_read.max_input_tokens`，多篇对比时各篇平分 |
 | LLM 超时 | 新增 `deep_read.timeout_seconds`（默认 180 秒），覆盖 `llm.timeout_seconds`：几万 token 的输入经常超过 60 秒 |
 | 代码链接 | 只从正文提取（HTML 链接、PDF 链接注释、正文中的 URL），参考文献中的链接不算；Hugging Face Papers 接口的真实响应格式还没有确认，暂未接入 |
-| 相关工作 | Semantic Scholar 参考文献（有影响力的、被引多的优先）取 6 篇、推荐论文取 4 篇；与用户历史的向量近邻检索留到 Phase 3。没有 `S2_API_KEY` 时容易被限流，只重试一次，失败就在回复中注明，并让模型依据论文自己的相关工作章节比较 |
+| 相关工作 | Semantic Scholar 参考文献（有影响力的、被引多的优先）取 6 篇、推荐论文取 4 篇；与用户历史的向量近邻检索留到 Phase 3（Phase 3 也没有做，见 13.2）。没有 `S2_API_KEY` 时容易被限流，只重试一次，失败就在回复中注明，并让模型依据论文自己的相关工作章节比较 |
 | `/compare` | 最多 5 篇；同一篇写了两次按单篇处理。结果不缓存 |
 | `<ref>` | 只支持新式 arXiv ID（`2410.12345`）；版本号被忽略，总是读取最新版本。不在当天日报中的 ID 通过 arXiv API 补全元数据，API 不可用时从 HTML 全文中取标题和摘要 |
 | 表情 | 👀 和 🚀 由 `gleaner handle-comment` 添加（而不是 workflow 的单独步骤）；出错时加 😕 |
 | 回复 | 超过约 60000 字符时拆成多条评论，断在空行处，必要时闭合再重新打开代码块和 `<details>`；外部文本一律转义，模型输出保留 `>` 引用块但转义 `<` |
-| 反馈 | `/deep`、`/compare` 作为 +0.5 的隐式反馈写入 `feedback/<YYYY-MM>.jsonl`，Phase 3 再读取 |
+| 反馈 | `/deep`、`/compare` 作为 +0.5 的隐式反馈写入 `feedback/<YYYY-MM>.jsonl`，Phase 3 再读取（已接入，见 13.2） |
 | 自动深读 | `deep_read.auto_top_m` 还没有接入日报 |
 | 失败降级 | arXiv、Semantic Scholar、LLM 失败都不让指令崩溃：LLM 失败时回复摘要和代码链接；全文获取失败时基于摘要分析并注明；只有序号越界、参数写错等用户能修正的问题才回复错误原因 |
+
+### 13.2 Phase 3 实现说明
+
+与上文设计不同或做了取舍的地方：
+
+| 项目 | 实现 |
+| --- | --- |
+| 表情只统计仓库所有者 | 只有 `GITHUB_REPOSITORY_OWNER`（不区分大小写；没有时从 `GITHUB_REPOSITORY` 中取 owner）点的 👍/👎 算反馈，协作者、机器人和其他人的都忽略，也不提供可配置的用户列表，符合「一个 fork 对应一个用户」。两个环境变量都没有时（如本地运行）跳过同步并警告。指令仍然响应 OWNER / MEMBER / COLLABORATOR |
+| `/unmute` | 新增 `/unmute <主题>` 取消屏蔽，不用去 gleaner-data 分支手改文件；`/mute` 不带参数时列出当前屏蔽的主题 |
+| `profile/muted.jsonl` | 第 4 节原来写的是 `muted.json`。改成只追加 `mute` / `unmute` 事件的 jsonl，并发写入时由 `merge=union` 自动合并。当前的屏蔽列表 = 按 `created_at` 回放全部事件（不按行序）；比较主题时去掉首尾空白、合并连续空白、忽略大小写；重复 mute 同一个主题时只回复「已经屏蔽过了」 |
+| 屏蔽主题的英文描述 | bge-small 是英文模型，`/mute` 时由 fast 模型把主题写成一两句英文（≤ 500 字符），存进 mute 事件。生成失败或用户手写的事件缺少描述时，日报运行时补上，并追加一条与原事件同一时间的 mute 事件（回放结果不变）；补不上的这次不参与粗筛，只给出警告 |
+| 反馈记录 | 全部经 `profile/memory.py` 追加到 `feedback/<YYYY-MM>.jsonl`（按配置时区分月）；读取最近 12 个月。表情记录的 `weight` 是同步时的状态，撤销写成 `weight=0`。聚合规则见 3.4 |
+| `/like`、`/dislike` | 原因只取指令那一行（`/like 3 有开源代码`、`/like 3，有开源代码`、`/like 3：有开源代码` 都可以），最多 200 字，回复时放进行内代码；之后的 `/dislike` 覆盖之前的 `/like`，回复中会注明 |
+| 粗筛公式 | `mean_top3` 与时间衰减的组合见 3.1.1：先按「信号强度 × 时间衰减」给每个锚点的相似度加权，再取最大的 3 个求平均，不足 3 个按 0 计；屏蔽主题不衰减 |
+| 可观察的变化 | 每篇候选记录粗筛分项（兴趣、正反馈、负向），`gleaner daily --dry-run` 打印出来；日报 Issue 的「本次运行」里列出 👍、👎、`/like`、`/dislike`、`/deep`/`/compare` 各多少篇，正负反馈锚点和屏蔽主题各多少，以及本次同步了几条表情、同步是否失败；`gleaner feedback` 在本地查看聚合结果 |
+| `learned_preferences.md` | 格式见下。只由 `gleaner summarize-preferences`（weekly.yml）写入；输入是当前文件（含用户手改的内容）、`interests.md`（只读）和上次总结之后收到新反馈的论文（信号、原因、标题、截断到 300 字符的摘要），按「带原因的显式反馈 > 显式反馈 > 表情 > 隐式反馈」排序，总输入不超过约 12k token；模型只返回新的正文（≤ 3000 字符），失败时保留旧文件。用户把正文写到超过 3000 字符时不更新，提示先精简，避免模型删掉用户的内容 |
+| 精排注入 | 学到的偏好（去掉 HTML 注释、截断到约 1500 token）和屏蔽主题的原文按不可信数据包裹后加进精排的 system prompt；两者都没有时 prompt 不变 |
+| 未做 | 周报 Issue；「新增反馈达到 N 条时触发」偏好总结；用「与用户历史的向量近邻」增强 `/compare`；自动深读（`deep_read.auto_top_m`）仍未接入日报 |
+
+**`learned_preferences.md` 格式**
+
+```markdown
+<!-- gleaner:preferences feedback_until=2026-11-01T12:00:00+00:00 updated_at=2026-11-01T12:30:00+00:00 model=deepseek-chat -->
+<!-- gleaner:note 由 Paper Gleaner 每周根据你的反馈更新。可以直接编辑或删除条目，下次更新会在你修改后的内容上增量调整；以 gleaner: 开头的注释请保留。 -->
+
+### 偏好
+- 偏好有开源代码、能复现的工作（3 次 /like 提到）
+
+### 不感兴趣
+- 对纯 benchmark、没有新方法的论文兴趣低（2 次 /dislike）
+```
+
+- 开头两行注释由程序生成：`feedback_until` 是上次总结时最新一条反馈的时间，之后没有更新的反馈就不调用 LLM。删掉这两行只会让下次把最近 12 个月的反馈重新总结一遍；
+- 正文是两个小节的条目列表，每条一句话，括号里写依据。新增条目至少要有两条一致的反馈，或一条带原因的 `/like`、`/dislike`；已有条目只在新反馈明确矛盾时才改动；
+- 模型输出里伪造的 `gleaner:` 注释会被去掉。
 
 ---
 
