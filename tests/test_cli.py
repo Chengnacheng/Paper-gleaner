@@ -46,6 +46,8 @@ ENV_VARS = [
     "GITHUB_REPOSITORY",
     "GITHUB_REPOSITORY_OWNER",
     "GITHUB_API_URL",
+    "GITHUB_SERVER_URL",
+    "GITHUB_ACTIONS",
     "GITHUB_STEP_SUMMARY",
     "GITHUB_EVENT_PATH",
     "S2_API_KEY",
@@ -285,6 +287,124 @@ def test_daily_commits_synced_reactions_when_already_published(
     month = digest.day.strftime("%Y-%m")
     saved = git("show", f"gleaner-data:feedback/{month}.jsonl", cwd=git_remote)
     assert '"signal": "down"' in saved
+
+
+# --- 推送渠道 -------------------------------------------------------------------
+
+FEISHU = "https://open.feishu.cn/open-apis/bot/v2/hook/feishu-token-123"
+WECOM = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=wecom-key-456"
+CHANNELS_CONFIG = (
+    "sources:\n  arxiv:\n    categories: [cs.CL, cs.LG]\n"
+    "notify:\n  feishu: {enabled: true}\n  wecom: {enabled: true}\n"
+)
+
+
+def channel_env(path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (path / "config.yaml").write_text(CHANNELS_CONFIG)
+    monkeypatch.setenv("FEISHU_WEBHOOK", FEISHU)
+    monkeypatch.setenv("FEISHU_SECRET", "sign-secret")
+    monkeypatch.setenv("WECOM_WEBHOOK", WECOM)
+
+
+@respx.mock
+def test_notify_test_sends_to_enabled_channels(
+    workdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    channel_env(workdir, monkeypatch)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+    feishu = respx.post(FEISHU).mock(return_value=httpx.Response(200, json={"code": 0}))
+    wecom = respx.post(WECOM).mock(
+        return_value=httpx.Response(200, json={"errcode": 93000, "errmsg": "invalid webhook url"})
+    )
+
+    result = runner.invoke(app, ["notify-test"])
+
+    assert result.exit_code == 1, result.output
+    assert "✓ 飞书：测试消息已发送，请查收" in result.output
+    assert "✗ 企业微信：企业微信返回错误 93000：Webhook 地址无效" in result.output
+    card = json.loads(feishu.calls.last.request.content)["card"]
+    assert card["header"]["title"]["content"].startswith("【测试】📚 Paper Gleaner · ")
+    assert "https://github.com/o/r/issues?q=label%3Adaily" in json.dumps(card)
+    assert wecom.called
+    assert "feishu-token-123" not in result.output and "wecom-key-456" not in result.output
+
+    only = runner.invoke(app, ["notify-test", "--channel", "feishu"])
+    assert only.exit_code == 0, only.output
+    assert "企业微信" not in only.output
+
+
+def test_notify_test_reports_disabled_and_unknown_channels(workdir: Path) -> None:
+    result = runner.invoke(app, ["notify-test"])
+    assert result.exit_code == 1
+    assert "没有启用任何推送渠道" in result.output
+
+    result = runner.invoke(app, ["notify-test", "--channel", "email"])
+    assert result.exit_code == 1
+    assert "✗ 邮件没有启用：在 config.yaml 中设置 notify.email.enabled: true" in result.output
+
+    result = runner.invoke(app, ["notify-test", "--channel", "sms"])
+    assert result.exit_code == 1
+    assert "不认识的渠道：sms" in result.output
+
+
+def test_notify_test_reports_missing_secrets(workdir: Path) -> None:
+    (workdir / "config.yaml").write_text("notify:\n  feishu: {enabled: true}\n")
+
+    result = runner.invoke(app, ["notify-test"])
+
+    assert result.exit_code == 1
+    assert "✗ 飞书已启用但没有配置好，这次不发送：缺少环境变量 FEISHU_WEBHOOK" in result.output
+
+
+@respx.mock
+def test_daily_dry_run_does_not_notify(
+    repo: Path, rss_bytes: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    channel_env(repo, monkeypatch)
+    respx.get(RSS_URL).mock(return_value=httpx.Response(200, content=rss_bytes))
+    feishu = respx.post(FEISHU)
+    wecom = respx.post(WECOM)
+
+    result = runner.invoke(app, ["daily", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "[1] 9/10  2610.00001" in result.output
+    assert not feishu.called and not wecom.called
+    assert "推送：" not in result.output
+
+
+@respx.mock
+def test_daily_notifies_after_publishing(
+    repo: Path, rss_bytes: bytes, git_remote: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    channel_env(repo, monkeypatch)
+    github_env(monkeypatch)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    respx.get(RSS_URL).mock(return_value=httpx.Response(200, content=rss_bytes))
+    respx.get(f"{API}/issues").mock(return_value=httpx.Response(200, json=[]))
+    respx.post(f"{API}/labels").mock(return_value=httpx.Response(201, json={}))
+    respx.post(f"{API}/issues").mock(
+        return_value=httpx.Response(
+            201, json={"number": 5, "html_url": "https://github.com/o/r/issues/5"}
+        )
+    )
+    respx.post(f"{API}/issues/5/comments").mock(return_value=httpx.Response(201, json={"id": 1}))
+    feishu = respx.post(FEISHU).mock(return_value=httpx.Response(200, json={"code": 0}))
+    respx.post(WECOM).mock(side_effect=httpx.ConnectError(f"failed to connect {WECOM}"))
+
+    result = runner.invoke(app, ["daily"])
+
+    assert result.exit_code == 0, result.output
+    assert "✓ 已发布：https://github.com/o/r/issues/5" in result.output
+    assert "· 推送：飞书 ✓ · 企业微信 ✗" in result.output
+    assert "::warning::企业微信推送失败：请求企业微信机器人失败" in result.output
+    assert "wecom-key-456" not in result.output
+    card = json.loads(feishu.calls.last.request.content)["card"]
+    assert "https://github.com/o/r/issues/5" in json.dumps(card)
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+    saved = git("show", f"gleaner-data:history/digests/{today}.json", cwd=git_remote)
+    assert '"feishu": {\n      "status": "sent"' in saved
+    assert "wecom-key-456" not in saved
 
 
 # --- 反馈与偏好 -----------------------------------------------------------------

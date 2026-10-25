@@ -10,6 +10,7 @@ from gleaner.filters import record_seen
 from gleaner.llm import LLMError
 from gleaner.models import Digest, Paper, ScoredPaper
 from gleaner.notify import GitHubError, IssueRef
+from gleaner.notify.base import NotifyError
 from gleaner.pipelines.daily import digest_path, run_daily
 from gleaner.profile import (
     LEARNED_PREFERENCES_PATH,
@@ -25,6 +26,7 @@ from gleaner.store import DataStore
 from tests.conftest import (
     FIXTURES,
     PIPELINE_VOCABULARY,
+    FakeNotifier,
     KeywordEmbedder,
     fake_llm,
     pipeline_llm,
@@ -246,6 +248,114 @@ def test_force_republishes(config: Config, papers: list[Paper], tmp_path: Path) 
     assert result.status == "published"
 
 
+# --- 推送渠道 -------------------------------------------------------------------
+
+
+def test_notifies_after_publishing(config: Config, papers: list[Paper], tmp_path: Path) -> None:
+    store = DataStore(tmp_path)
+    email = FakeNotifier("email")
+    feishu = FakeNotifier("feishu", NotifyError("飞书返回错误 19021：签名校验失败"))
+    wecom = FakeNotifier("wecom")
+
+    result, _, _ = run(
+        config, store, papers, publisher=FakePublisher(), notifiers=[email, feishu, wecom]
+    )
+
+    # 某个渠道失败不影响其它渠道和日报
+    assert result.status == "published"
+    [(sent, test)] = email.sent
+    assert sent.issue_url == "https://x/7" and test is False
+    assert len(wecom.sent) == 1
+    saved = store.read_model(digest_path(TODAY), Digest)
+    assert {name: r.status for name, r in saved.notifications.items()} == {
+        "email": "sent",
+        "feishu": "failed",
+        "wecom": "sent",
+    }
+    assert saved.notifications["feishu"].error == "飞书返回错误 19021：签名校验失败"
+    assert result.notified == saved.notifications
+    assert result.warnings == ["飞书推送失败：飞书返回错误 19021：签名校验失败"]
+
+
+def test_fallback_run_only_resends_failed_channels(
+    config: Config, papers: list[Paper], tmp_path: Path
+) -> None:
+    store = DataStore(tmp_path)
+    email, feishu = FakeNotifier("email"), FakeNotifier("feishu", NotifyError("限流"))
+    first, _, _ = run(config, store, papers, publisher=FakePublisher(), notifiers=[email, feishu])
+    complete = first.digest.model_copy(update={"comment_ids": {"2610.00001": 1, "2610.00002": 2}})
+    store.write_model(digest_path(TODAY), complete)
+
+    email2, feishu2, wecom2 = FakeNotifier("email"), FakeNotifier("feishu"), FakeNotifier("wecom")
+    publisher = FakePublisher(IssueRef(7, "https://x/7"))
+    result, fake, source = run(
+        config, store, papers, publisher=publisher, notifiers=[email2, feishu2, wecom2]
+    )
+
+    assert result.status == "repaired"
+    assert source.calls == 0 and fake.requests == []
+    assert email2.sent == [] and wecom2.sent == []  # 成功过的、上次没启用的都不发
+    assert len(feishu2.sent) == 1
+    assert result.notified["feishu"].status == "sent"
+    saved = store.read_model(digest_path(TODAY), Digest)
+    assert saved.notifications["feishu"].status == "sent"
+    assert saved.notifications["email"] == first.digest.notifications["email"]
+
+    third, _, _ = run(
+        config, store, papers, publisher=publisher, notifiers=[FakeNotifier("feishu")]
+    )
+    assert third.status == "already_published"
+
+
+def test_notifies_without_github_issue(config: Config, papers: list[Paper], tmp_path: Path) -> None:
+    store = DataStore(tmp_path)
+    wecom = FakeNotifier("wecom", NotifyError("企业微信返回错误 45009"))
+
+    result, _, _ = run(config, store, papers, notifiers=[wecom])
+
+    assert result.status == "published"
+    [(sent, _)] = wecom.sent
+    assert sent.issue_url is None and sent.issue_number is None
+
+    # 兜底运行：不重新生成，只补发失败的渠道
+    retry = FakeNotifier("wecom")
+    second, fake, source = run(config, store, papers, notifiers=[retry])
+    assert second.status == "repaired"
+    assert source.calls == 0 and fake.requests == []
+    assert len(retry.sent) == 1
+
+    third, _, source = run(config, store, papers, notifiers=[FakeNotifier("wecom")])
+    assert third.status == "already_published" and source.calls == 0
+
+
+def test_no_notification_without_relevant_papers(
+    config: Config, papers: list[Paper], tmp_path: Path
+) -> None:
+    email = FakeNotifier("email")
+    low = {paper_id: 3 for paper_id in SCORES}
+
+    result, _, _ = run(
+        config,
+        DataStore(tmp_path),
+        papers,
+        scores=low,
+        publisher=FakePublisher(),
+        notifiers=[email],
+    )
+
+    assert result.status == "nothing_relevant"
+    assert email.sent == []
+    assert result.digest.notifications == {}
+
+
+def test_no_notification_without_announcements(config: Config, tmp_path: Path) -> None:
+    email = FakeNotifier("email")
+    result, _, _ = run(config, DataStore(tmp_path), [], notifiers=[email], sample_size=20)
+
+    assert result.status == "no_announcements"
+    assert email.sent == []
+
+
 def test_no_announcements(config: Config, tmp_path: Path) -> None:
     publisher = FakePublisher()
     result, fake, _ = run(config, DataStore(tmp_path / "data"), [], publisher=publisher)
@@ -391,6 +501,7 @@ def test_reads_phase2_digest() -> None:
     assert paper.coarse_score == 0.8093
     assert (paper.interest_score, paper.positive_score, paper.negative_score) == (None, None, None)
     assert digest.stats.feedback.empty
+    assert digest.notifications == {}  # Phase 4 的推送结果字段取默认值
 
 
 # --- 反馈参与粗筛 ---------------------------------------------------------------
