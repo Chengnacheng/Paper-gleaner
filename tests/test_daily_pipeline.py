@@ -8,7 +8,7 @@ import pytest
 from gleaner.config import Config
 from gleaner.filters import record_seen
 from gleaner.llm import LLMError
-from gleaner.models import Digest, Paper, ScoredPaper
+from gleaner.models import DeepReport, Digest, Paper, ScoredPaper
 from gleaner.notify import GitHubError, IssueRef
 from gleaner.notify.base import NotifyError
 from gleaner.pipelines.daily import digest_path, run_daily
@@ -21,9 +21,11 @@ from gleaner.profile import (
     record_feedback,
 )
 from gleaner.profile.muted import MUTED_PATH
+from gleaner.reader import FullText, Section, load_report, save_report
 from gleaner.sources.arxiv import parse_rss
 from gleaner.store import DataStore
 from tests.conftest import (
+    DEEP_REPORT,
     FIXTURES,
     PIPELINE_VOCABULARY,
     FakeNotifier,
@@ -59,17 +61,20 @@ class FakePublisher:
         self.existing = existing
         self.published: list[Digest] = []
         self.repaired: list[Digest] = []
+        self.reports: list[dict] = []  # 每次 publish / repair 收到的自动深读报告
         self.closed = 0
 
     def find_existing(self, day: date) -> IssueRef | None:
         return self.existing
 
-    def publish(self, digest: Digest) -> Digest:
+    def publish(self, digest: Digest, reports=None) -> Digest:
         self.published.append(digest)
+        self.reports.append(dict(reports or {}))
         return digest.model_copy(update={"issue_number": 7, "issue_url": "https://x/7"})
 
-    def repair(self, digest: Digest) -> Digest:
+    def repair(self, digest: Digest, reports=None) -> Digest:
         self.repaired.append(digest)
+        self.reports.append(dict(reports or {}))
         ids = {p.id: 900 + i for i, p in enumerate(digest.papers)} | digest.comment_ids
         return digest.model_copy(update={"comment_ids": ids})
 
@@ -114,7 +119,10 @@ def seed_yesterday(store: DataStore) -> None:
 def config(tmp_path: Path) -> Config:
     interests = tmp_path / "interests.md"
     interests.write_text("我研究长上下文推理和 RAG。", encoding="utf-8")
-    return Config.model_validate({"profile": {"interests_file": str(interests)}})
+    # 自动深读另有专门的测试；这里关掉，避免请求 arXiv 全文
+    return Config.model_validate(
+        {"profile": {"interests_file": str(interests)}, "deep_read": {"auto_top_m": 0}}
+    )
 
 
 @pytest.fixture
@@ -607,3 +615,201 @@ def test_rerank_sees_preferences_and_muted_topics(
     assert "<preferences>\n### 偏好\n- 有开源代码\n</preferences>" in system
     assert "<muted>\n- 医学影像\n</muted>" in system
     assert "gleaner:note" not in system
+
+
+# --- 自动深读 -------------------------------------------------------------------
+
+
+class FakeFetcher:
+    """代替 FulltextFetcher：返回一段固定的正文；sections 为空表示连摘要都没有。"""
+
+    def __init__(self, *, empty: bool = False, error: Exception | None = None) -> None:
+        self.empty = empty
+        self.error = error
+        self.calls: list[str] = []
+
+    def fetch(self, paper: Paper) -> FullText:
+        self.calls.append(paper.id)
+        if self.error is not None:
+            raise self.error
+        sections = (
+            [] if self.empty else [Section("Introduction", "We compress KV cache.", "introduction")]
+        )
+        return FullText("html", sections, links=["https://github.com/example/longkv"])
+
+
+def deep_handler(scores=SCORES, *, fail: bool = False):
+    """在 pipeline_llm 之外再处理深读。"""
+    base = pipeline_llm(scores)
+
+    def handler(request: dict[str, Any]) -> str:
+        if "深读报告" in request["messages"][0]["content"]:
+            if fail:
+                raise LLMError("调用 deepseek-reasoner 失败：Request timed out.")
+            return DEEP_REPORT
+        return base(request)
+
+    return handler
+
+
+def run_deep(config: Config, store: DataStore, papers: list[Paper], *, handler=None, **kwargs):
+    llm, fake = fake_llm(handler or deep_handler(), **kwargs.pop("llm", {}))
+    fetcher = kwargs.pop("fetcher", FakeFetcher())
+    result = run_daily(
+        config,
+        store=store,
+        llm=llm,
+        embedder=KeywordEmbedder(PIPELINE_VOCABULARY),
+        today=TODAY,
+        source=FakeSource(papers),
+        fetcher=fetcher,
+        now=datetime(2026, 10, 26, 1, 30, tzinfo=UTC),
+        **kwargs,
+    )
+    return result, fake, fetcher
+
+
+def with_auto_deep_read(config: Config, top_m: int = 1) -> Config:
+    return config.model_copy(
+        update={"deep_read": config.deep_read.model_copy(update={"auto_top_m": top_m})}
+    )
+
+
+def deep_requests(fake) -> list[dict]:
+    return [r for r in fake.requests if "深读报告" in r["messages"][0]["content"]]
+
+
+def test_auto_deep_read_attaches_report_and_caches(
+    config: Config, papers: list[Paper], tmp_path: Path
+) -> None:
+    store = DataStore(tmp_path)
+    publisher = FakePublisher()
+
+    result, fake, fetcher = run_deep(
+        with_auto_deep_read(config), store, papers, publisher=publisher
+    )
+
+    assert result.status == "published"
+    assert fetcher.calls == ["2610.00001"]  # 只深读排在第一的那篇
+    [request] = deep_requests(fake)
+    assert request["model"] == "deepseek-reasoner"
+    [reports] = publisher.reports
+    assert list(reports) == ["2610.00001"]
+    assert reports["2610.00001"].body == DEEP_REPORT
+    cached = load_report(store, "2610.00001")
+    assert cached is not None and cached.body == DEEP_REPORT  # 之后 /deep 直接返回缓存
+    digest = store.read_model(digest_path(TODAY), Digest)
+    assert digest.deep_reads == ["2610.00001"]
+    assert digest.stats.deep_read == 1
+    assert digest.stats.llm_calls == len(fake.requests) == 4  # 深读的 token 计入运行统计
+    assert result.warnings == []
+
+
+def test_auto_deep_read_reuses_cache(config: Config, papers: list[Paper], tmp_path: Path) -> None:
+    store = DataStore(tmp_path)
+    report = DeepReport(
+        paper_id="2610.00001",
+        title="LongKV",
+        model="deepseek-reasoner",
+        source="pdf",
+        generated_at=datetime(2026, 10, 20, tzinfo=UTC),
+        body="### 一句话总结\n缓存的报告。",
+    )
+    save_report(store, report)
+    publisher = FakePublisher()
+
+    result, fake, fetcher = run_deep(
+        with_auto_deep_read(config), store, papers, publisher=publisher
+    )
+
+    assert fetcher.calls == [] and deep_requests(fake) == []
+    assert publisher.reports[0]["2610.00001"].body == "### 一句话总结\n缓存的报告。"
+    assert result.digest.deep_reads == ["2610.00001"]
+
+
+def test_auto_deep_read_disabled_makes_no_calls(
+    config: Config, papers: list[Paper], tmp_path: Path
+) -> None:
+    result, fake, fetcher = run_deep(config, DataStore(tmp_path), papers)  # auto_top_m=0
+
+    assert fetcher.calls == [] and deep_requests(fake) == []
+    assert result.digest.deep_reads == [] and result.digest.stats.deep_read == 0
+
+
+def test_auto_deep_read_llm_failure_degrades(
+    config: Config, papers: list[Paper], tmp_path: Path
+) -> None:
+    store = DataStore(tmp_path)
+    publisher = FakePublisher()
+
+    result, _, _ = run_deep(
+        with_auto_deep_read(config),
+        store,
+        papers,
+        handler=deep_handler(fail=True),
+        publisher=publisher,
+    )
+
+    assert result.status == "published"
+    assert publisher.reports == [{}]
+    assert result.digest.deep_reads == []
+    [note] = result.digest.stats.deep_read_notes
+    assert note.startswith("第 1 篇自动深读失败：调用 deepseek-reasoner 失败")
+    assert result.warnings == [note]
+    assert load_report(store, "2610.00001") is None
+
+
+@pytest.mark.parametrize(
+    ("fetcher", "reason"),
+    [
+        (FakeFetcher(empty=True), "没能获取全文和摘要"),
+        (FakeFetcher(error=RuntimeError("corrupt pdf")), "获取全文失败（RuntimeError）"),
+    ],
+)
+def test_auto_deep_read_fulltext_failure_degrades(
+    config: Config, papers: list[Paper], tmp_path: Path, fetcher: FakeFetcher, reason: str
+) -> None:
+    result, fake, _ = run_deep(
+        with_auto_deep_read(config), DataStore(tmp_path), papers, fetcher=fetcher
+    )
+
+    assert result.status == "preview"
+    assert deep_requests(fake) == []
+    assert result.digest.stats.deep_read_notes == [f"第 1 篇没有自动深读：{reason}"]
+
+
+def test_auto_deep_read_skipped_over_budget(
+    config: Config, papers: list[Paper], tmp_path: Path
+) -> None:
+    # 前面的调用每次记 120 token；剩余预算不够 max_input_tokens + 输出时跳过
+    result, fake, fetcher = run_deep(
+        with_auto_deep_read(config),
+        DataStore(tmp_path),
+        papers,
+        llm={"daily_token_budget": 20_000},
+    )
+
+    assert fetcher.calls == [] and deep_requests(fake) == []
+    [note] = result.digest.stats.deep_read_notes
+    assert "第 1 篇没有自动深读：今天已用 360 token" in note
+    assert "超出 llm.daily_token_budget（20.0k）" in note
+    assert result.warnings == [note]
+
+
+def test_fallback_run_reattaches_cached_report(
+    config: Config, papers: list[Paper], tmp_path: Path
+) -> None:
+    store = DataStore(tmp_path)
+    first, _, _ = run_deep(with_auto_deep_read(config), store, papers, publisher=FakePublisher())
+    # 第一篇的评论（附深读报告）上次没发出去
+    saved = first.digest.model_copy(update={"comment_ids": {"2610.00002": 12}})
+    store.write_model(digest_path(TODAY), saved)
+    publisher = FakePublisher(IssueRef(7, "https://x/7"))
+
+    result, fake, fetcher = run_deep(
+        with_auto_deep_read(config), store, papers, publisher=publisher
+    )
+
+    assert result.status == "repaired"
+    assert fake.requests == [] and fetcher.calls == []  # 不重新生成
+    assert publisher.reports[0]["2610.00001"].body == DEEP_REPORT

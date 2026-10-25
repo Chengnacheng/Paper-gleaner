@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
@@ -12,7 +13,7 @@ from typing import Any
 import httpx
 
 from gleaner.config import GithubIssueNotifyConfig
-from gleaner.models import Digest, ScoredPaper
+from gleaner.models import DeepReport, Digest, ScoredPaper
 from gleaner.render import issue_body, issue_title, issue_title_prefix, paper_section
 
 LABELS = {
@@ -210,9 +211,10 @@ class IssuePublisher:
                 return IssueRef(number=issue["number"], url=issue["html_url"])
         return None
 
-    def publish(self, digest: Digest) -> Digest:
+    def publish(self, digest: Digest, reports: Mapping[str, DeepReport] | None = None) -> Digest:
         """创建当日 Issue 和每篇论文的评论，返回填好 Issue 信息的 digest。
 
+        reports 是自动深读的报告（论文 ID → 报告），附在对应论文的评论里。
         单条评论失败不中断发布；发完后再补发一轮，仍失败的留给下一次运行（见 repair）。
         """
         for name, (color, description) in LABELS.items():
@@ -225,10 +227,11 @@ class IssuePublisher:
             return digest
 
         comment_ids: dict[str, int] = {}
-        self._post_comments(issue.number, list(enumerate(digest.papers, start=1)), comment_ids)
-        return self.repair(digest.model_copy(update={"comment_ids": comment_ids}))
+        papers = list(enumerate(digest.papers, start=1))
+        self._post_comments(issue.number, papers, comment_ids, reports or {})
+        return self.repair(digest.model_copy(update={"comment_ids": comment_ids}), reports)
 
-    def repair(self, digest: Digest) -> Digest:
+    def repair(self, digest: Digest, reports: Mapping[str, DeepReport] | None = None) -> Digest:
         """补发 digest 中缺失的论文评论，返回更新了 comment_ids 的 digest。
 
         先读取 Issue 上已有的评论：上次的请求可能已经生效、只是没收到响应，
@@ -256,17 +259,22 @@ class IssuePublisher:
             digest.issue_number,
             [(index, paper) for index, paper in missing if paper.id not in comment_ids],
             comment_ids,
+            reports or {},
         )
         return digest.model_copy(update={"comment_ids": comment_ids})
 
     def _post_comments(
-        self, issue_number: int, papers: list[tuple[int, ScoredPaper]], comment_ids: dict[str, int]
+        self,
+        issue_number: int,
+        papers: list[tuple[int, ScoredPaper]],
+        comment_ids: dict[str, int],
+        reports: Mapping[str, DeepReport],
     ) -> None:
         for index, paper in papers:
             time.sleep(self.pause_seconds)
             try:
                 comment_ids[paper.id] = self.github.create_comment(
-                    issue_number, paper_section(index, paper)
+                    issue_number, paper_section(index, paper, reports.get(paper.id))
                 )
             except (GitHubError, httpx.HTTPError) as e:
                 logger.warning("第 %d 篇论文的评论发布失败：%s", index, e)

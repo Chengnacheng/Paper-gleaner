@@ -6,7 +6,7 @@ import pytest
 import respx
 
 from gleaner.config import GithubIssueNotifyConfig
-from gleaner.models import Digest, ScoredPaper
+from gleaner.models import DeepReport, Digest, ScoredPaper
 from gleaner.notify import GitHubClient, GitHubError, IssuePublisher, IssueRef
 
 API = "https://api.github.com/repos/o/r"
@@ -111,6 +111,29 @@ def test_publish_creates_issue_and_comments() -> None:
     assert digest.issue_number == 5
     assert digest.issue_url == "https://github.com/o/r/issues/5"
     assert digest.comment_ids == {"2610.00001": 101, "2610.00002": 102}
+
+
+@respx.mock
+def test_publish_attaches_deep_report_to_its_comment() -> None:
+    respx.post(f"{API}/labels").mock(return_value=httpx.Response(201, json={}))
+    respx.post(f"{API}/issues").mock(return_value=httpx.Response(201, json=issue(5, "t")))
+    comments = respx.post(f"{API}/issues/5/comments").mock(
+        side_effect=[httpx.Response(201, json={"id": 101}), httpx.Response(201, json={"id": 102})]
+    )
+    report = DeepReport(
+        paper_id="2610.00001",
+        title="Paper 1",
+        model="deepseek-reasoner",
+        source="html",
+        generated_at=datetime(2026, 10, 26, tzinfo=UTC),
+        body="### 一句话总结\n分层压缩。",
+    )
+
+    make_publisher().publish(make_digest(), {"2610.00001": report})
+
+    first, second = (json.loads(c.request.content)["body"] for c in comments.calls)
+    assert "<details><summary>🔍 深读报告</summary>\n\n### 一句话总结\n分层压缩。" in first
+    assert "<details>" not in second
 
 
 @respx.mock

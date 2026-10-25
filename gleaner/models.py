@@ -79,6 +79,8 @@ class RunStats(BaseModel):
     completion_tokens: int = 0
     duration_seconds: float = 0.0
     feedback: FeedbackStats = Field(default_factory=FeedbackStats)
+    deep_read: int = 0  # 自动深读的篇数（报告附在论文评论里）
+    deep_read_notes: list[str] = Field(default_factory=list)  # 没有自动深读的原因，如超出预算
 
 
 class ChannelResult(BaseModel):
@@ -105,6 +107,8 @@ class Digest(BaseModel):
     issue_url: str | None = None
     comment_ids: dict[str, int] = Field(default_factory=dict)  # 论文 ID → 评论 ID
     notifications: dict[str, ChannelResult] = Field(default_factory=dict)  # 渠道名 → 发送结果
+    # 自动深读过的论文：报告缓存在 reports/<arxiv_id>.md，补发评论时从缓存读取，不重新生成
+    deep_reads: list[str] = Field(default_factory=list)
 
 
 class DeepReport(BaseModel):

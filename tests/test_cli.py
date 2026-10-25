@@ -34,6 +34,8 @@ runner = CliRunner()
 RSS_URL = "https://rss.arxiv.org/rss/cs.CL+cs.LG"
 API = "https://api.github.com/repos/o/r"
 SCORES = {"2610.00001": 9, "2610.00002": 7, "2610.00003": 4}
+# 自动深读会请求 arXiv 全文，CLI 测试中关掉（另有专门的测试）
+REPO_CONFIG = "sources:\n  arxiv:\n    categories: [cs.CL, cs.LG]\ndeep_read:\n  auto_top_m: 0\n"
 ENV_VARS = [
     "LLM_API_KEY",
     "LLM_BASE_URL",
@@ -86,7 +88,7 @@ def repo(clone: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch, clean_en
     """以一个 git 仓库为工作目录，配置齐全，LLM 和嵌入模型换成假的。"""
     path = clone("repo")
     monkeypatch.chdir(path)
-    (path / "config.yaml").write_text("sources:\n  arxiv:\n    categories: [cs.CL, cs.LG]\n")
+    (path / "config.yaml").write_text(REPO_CONFIG)
     (path / "profile").mkdir()
     (path / "profile" / "interests.md").write_text("我研究长上下文推理。", encoding="utf-8")
     monkeypatch.setenv("LLM_API_KEY", "sk-test")
@@ -293,10 +295,7 @@ def test_daily_commits_synced_reactions_when_already_published(
 
 FEISHU = "https://open.feishu.cn/open-apis/bot/v2/hook/feishu-token-123"
 WECOM = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=wecom-key-456"
-CHANNELS_CONFIG = (
-    "sources:\n  arxiv:\n    categories: [cs.CL, cs.LG]\n"
-    "notify:\n  feishu: {enabled: true}\n  wecom: {enabled: true}\n"
-)
+CHANNELS_CONFIG = REPO_CONFIG + "notify:\n  feishu: {enabled: true}\n  wecom: {enabled: true}\n"
 
 
 def channel_env(path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -845,3 +844,27 @@ def test_local_deep_reports_bad_refs(interact_repo: Path) -> None:
     result = runner.invoke(app, ["deep", "9"])
     assert result.exit_code == 1
     assert "序号 9 超出范围" in result.output
+
+
+@respx.mock
+def test_daily_dry_run_auto_deep_reads_first_paper(
+    repo: Path, rss_bytes: bytes, html_text: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (repo / "config.yaml").write_text(REPO_CONFIG.replace("auto_top_m: 0", "auto_top_m: 1"))
+    base = pipeline_llm(SCORES)
+    use_llm(
+        monkeypatch,
+        lambda request: (
+            DEEP_REPORT if "深读报告" in request["messages"][0]["content"] else base(request)
+        ),
+    )
+    respx.get(RSS_URL).mock(return_value=httpx.Response(200, content=rss_bytes))
+    html = respx.get(HTML_URL).mock(return_value=httpx.Response(200, text=html_text))
+
+    result = runner.invoke(app, ["daily", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert html.called
+    assert "    🔍 已自动深读：报告附在评论里，并写入 reports/2610.00001.md" in result.output
+    assert "自动深读 1 篇，报告附在对应论文的评论里" in result.output
+    assert "LLM 调用 4 次" in result.output

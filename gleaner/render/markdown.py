@@ -9,14 +9,22 @@ from __future__ import annotations
 import html
 import re
 from datetime import date
+from typing import Literal
 
-from gleaner.models import Digest, FeedbackStats, Paper, RunStats, ScoredPaper
+from gleaner.models import DeepReport, Digest, FeedbackStats, Paper, RunStats, ScoredPaper
 
 TITLE_PREFIX = "📚 Paper Gleaner"
 _ZERO_WIDTH_SPACE = "​"
 # GitHub 评论正文最多 65536 个字符；拆分时留出余量给「续」的提示
 COMMENT_LIMIT = 65_536
 SPLIT_LIMIT = 60_000
+# 自动深读报告附在论文评论里，整条评论不能超过 COMMENT_LIMIT；留出余量给标记和页脚
+_REPORT_MARGIN = 500
+REPORT_SOURCE_NAMES: dict[Literal["html", "pdf", "abstract"], str] = {
+    "html": "arXiv HTML",
+    "pdf": "PDF",
+    "abstract": "仅摘要",
+}
 
 
 def issue_title_prefix(day: date) -> str:
@@ -53,8 +61,11 @@ def issue_body(digest: Digest, *, per_paper_comment: bool = True) -> str:
     return "\n\n".join(parts) + "\n"
 
 
-def paper_section(index: int, paper: ScoredPaper) -> str:
-    """单篇论文的详细信息，作为一条评论发布（或在不分评论时写进正文）。"""
+def paper_section(index: int, paper: ScoredPaper, report: DeepReport | None = None) -> str:
+    """单篇论文的详细信息，作为一条评论发布（或在不分评论时写进正文）。
+
+    report 是自动深读的报告，以折叠块附在评论末尾，超长时截断，保证整条评论不超过上限。
+    """
     authors = ", ".join(paper.authors[:3]) + (" 等" if len(paper.authors) > 3 else "")
     meta = [f"**作者**：{sanitize(authors)}"] if authors else []
     if paper.categories:
@@ -79,8 +90,40 @@ def paper_section(index: int, paper: ScoredPaper) -> str:
         lines += [f"📄 **摘要**：{sanitize(_truncate(paper.abstract, 400))}", ""]
     if paper.tags:
         lines += ["🏷️ " + " ".join(f"`{tag.replace('`', '')}`" for tag in paper.tags), ""]
-    lines.append(f"<!-- gleaner:paper id={paper.id} index={index} -->")
+    marker = f"<!-- gleaner:paper id={paper.id} index={index} -->"
+    if report is not None:
+        used = sum(len(line) + 1 for line in lines) + len(marker)
+        lines += [deep_read_block(index, report, COMMENT_LIMIT - used - _REPORT_MARGIN), ""]
+    lines.append(marker)
     return "\n".join(lines)
+
+
+def deep_read_block(index: int, report: DeepReport, max_chars: int) -> str:
+    """自动深读报告的折叠块，不超过 max_chars 个字符；模型输出经过 sanitize_markdown。"""
+    source = REPORT_SOURCE_NAMES[report.source]
+    summary = "🔍 深读报告" + ("（仅基于摘要）" if report.source == "abstract" else "")
+    footer = (
+        f"<sub>自动深读 · 模型 {sanitize(report.model)} · 全文来源：{source} · "
+        f"评论 `/deep {index}` 直接取回这份报告，加 `--force` 重新生成</sub>"
+    )
+    head = f"<details><summary>{summary}</summary>\n\n"
+    tail = f"\n\n{footer}\n\n</details>"
+    body = sanitize_markdown(report.body)
+    budget = max_chars - len(head) - len(tail)
+    if len(body) > budget:
+        note = f"\n\n…（报告太长，这里只显示前一部分；评论 `/deep {index}` 查看完整报告）"
+        body = _truncate_markdown(body, max(budget - len(note), 0)) + note
+    return head + body + tail
+
+
+def _truncate_markdown(text: str, limit: int) -> str:
+    """截断到 limit 个字符以内，断在行尾；断在代码块中间时把代码块闭合。"""
+    cut = text[:limit]
+    if "\n" in cut and len(text) > limit:
+        cut = cut[: cut.rfind("\n")]
+    if sum(1 for line in cut.split("\n") if line.strip().startswith("```")) % 2:
+        cut += "\n```"
+    return cut.rstrip()
 
 
 def stats_line(stats: RunStats) -> str:
@@ -98,6 +141,9 @@ def stats_line(stats: RunStats) -> str:
     if stats.failed_batches:
         usage += f" · 精排失败 {stats.failed_batches} 批"
     lines = [funnel, usage]
+    if stats.deep_read:
+        lines.append(f"自动深读 {stats.deep_read} 篇，报告附在对应论文的评论里")
+    lines += [f"⚠️ {sanitize(_truncate(note, 200))}" for note in stats.deep_read_notes]
     if not stats.feedback.empty:
         lines += feedback_lines(stats.feedback)
     return "<br>\n".join(lines)

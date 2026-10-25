@@ -1,7 +1,11 @@
 """每日推送流水线（docs/architecture.md 3.1）。
 
-同步表情 → 抓取 → 去重与关键词过滤 → 向量粗筛 → LLM 精排 → 生成概览 → 发布 Issue
-→ 推送到邮件、飞书、企业微信 → 写入 gleaner-data。自动深读（第 5 步）还没有接入。
+同步表情 → 抓取 → 去重与关键词过滤 → 向量粗筛 → LLM 精排 → 生成概览 → 自动深读前 M 篇
+→ 发布 Issue → 推送到邮件、飞书、企业微信 → 写入 gleaner-data。
+
+自动深读（deep_read.auto_top_m，默认 1 篇）用 deep 档模型，报告以折叠块附在论文评论里，同时写入
+reports/ 缓存，之后 /deep 直接返回缓存。获取全文或 LLM 失败、剩余 token 预算不够时跳过，
+在运行结果中说明，不影响日报；兜底运行补发评论时从缓存读取报告，不重新生成。
 
 推送渠道只在日报发布成功时发送（没有启用 GitHub Issue 时照样发送，只是不带链接）；
 没有达到 min_score 的论文、没有新公告和 dry-run 都不发送。各渠道的结果记在 digest 里，
@@ -12,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Literal, Protocol
@@ -21,8 +25,8 @@ from pydantic import ValidationError
 
 from gleaner.config import Config
 from gleaner.filters import apply_filters, load_seen, record_seen
-from gleaner.llm import LLMClient
-from gleaner.models import ChannelResult, Digest, RunStats
+from gleaner.llm import BudgetExceededError, LLMClient, LLMError
+from gleaner.models import ChannelResult, DeepReport, Digest, RunStats, ScoredPaper
 from gleaner.notify import IssueRef
 from gleaner.notify.base import Notifier
 from gleaner.notify.dispatch import failed_channels, failure_warnings, send_all
@@ -34,6 +38,8 @@ from gleaner.pipelines.feedback import (
 )
 from gleaner.profile import ensure_queries, get_anchors, load_interests, load_memory
 from gleaner.ranking import Embedder, coarse_rank, rerank, summarize
+from gleaner.reader import FulltextFetcher, deep_read, load_report, save_report
+from gleaner.render.markdown import kilo
 from gleaner.sources import ArxivSource, Source
 from gleaner.store import DataStore
 
@@ -46,15 +52,20 @@ Status = Literal[
     "nothing_relevant",  # 没有达到 min_score 的论文，不发布
 ]
 
+# 判断剩余预算够不够自动深读：输入按 deep_read.max_input_tokens 计，另加这么多输出
+AUTO_DEEP_READ_OUTPUT_TOKENS = 4_000
+
 logger = logging.getLogger(__name__)
 
 
 class Publisher(Protocol):
     def find_existing(self, day: date) -> IssueRef | None: ...
 
-    def publish(self, digest: Digest) -> Digest: ...
+    def publish(
+        self, digest: Digest, reports: Mapping[str, DeepReport] | None = None
+    ) -> Digest: ...
 
-    def repair(self, digest: Digest) -> Digest: ...
+    def repair(self, digest: Digest, reports: Mapping[str, DeepReport] | None = None) -> Digest: ...
 
     def close_stale(self, now: datetime | None = None) -> list[int]: ...
 
@@ -105,6 +116,7 @@ def run_daily(
     reactions: ReactionReader | None = None,
     owner: str | None = None,
     notifiers: Sequence[Notifier] = (),
+    fetcher: FulltextFetcher | None = None,
     force: bool = False,
     sample_size: int | None = None,
     now: datetime | None = None,
@@ -113,6 +125,7 @@ def run_daily(
 
     reactions、owner：从哪里读取论文评论的表情、只统计谁的；没有时跳过表情同步。
     notifiers：发布后推送摘要的渠道（邮件、飞书、企业微信），dry-run 时为空。
+    fetcher：自动深读时获取全文，默认直接请求 arXiv。
     sample_size：没有新公告时，改用最近提交的这么多篇论文（不去重、不记录为已处理）。
     只在没有发布渠道时生效，用于周末等时候试运行、检查配置。
     """
@@ -179,6 +192,16 @@ def run_daily(
         muted_topics=[topic.topic for topic in memory.muted],
     )
     overview = summarize(reranked.selected, llm, config.language)
+    reports, deep_read_notes = _auto_deep_read(
+        reranked.selected[: config.deep_read.auto_top_m],
+        config=config,
+        store=store,
+        llm=llm,
+        fetcher=fetcher,
+        interests=interests,
+        now=now,
+    )
+    warnings += deep_read_notes
 
     usage = llm.tracker.total
     selected_ids = {p.id for p in reranked.selected}
@@ -188,6 +211,7 @@ def run_daily(
         overview=overview,
         papers=reranked.selected,
         others=[p for p in reranked.ranked if p.id not in selected_ids],
+        deep_reads=list(reports),
         stats=RunStats(
             fetched=len(papers),
             duplicates=filtered.duplicates,
@@ -203,6 +227,8 @@ def run_daily(
             feedback=memory.stats(now, ranking.feedback_half_life_days).model_copy(
                 update={"synced": sync.records, "sync_error": sync.error}
             ),
+            deep_read=len(reports),
+            deep_read_notes=deep_read_notes,
         ),
     )
 
@@ -212,7 +238,7 @@ def run_daily(
         status = "nothing_relevant"
     else:
         if publisher is not None:
-            digest = publisher.publish(digest)
+            digest = publisher.publish(digest, reports)
             status = "published"
         if notifiers:
             # 发布 Issue 之后再推送，消息里才有 Issue 链接；某个渠道失败不影响其它渠道
@@ -238,6 +264,66 @@ def run_daily(
     return DailyResult(
         status, digest, sampled=sampled, sync=sync, warnings=warnings, notified=notified
     )
+
+
+def _auto_deep_read(
+    papers: Sequence[ScoredPaper],
+    *,
+    config: Config,
+    store: DataStore,
+    llm: LLMClient,
+    fetcher: FulltextFetcher | None,
+    interests: str,
+    now: datetime,
+) -> tuple[dict[str, DeepReport], list[str]]:
+    """给排在最前的几篇论文生成深读报告并写入缓存；返回报告和没有深读的原因。
+
+    已有缓存的直接用缓存。任何一步失败都只跳过这一篇，不影响日报。
+    """
+    reports: dict[str, DeepReport] = {}
+    notes: list[str] = []
+    budget = llm.tracker.budget
+    need = config.deep_read.max_input_tokens + AUTO_DEEP_READ_OUTPUT_TOKENS
+    for index, paper in enumerate(papers, start=1):
+        if (cached := load_report(store, paper.id)) is not None:
+            reports[paper.id] = cached
+            continue
+        used = llm.tracker.total.total_tokens
+        if budget is not None and used + need > budget:
+            notes.append(
+                f"第 {index} 篇没有自动深读：今天已用 {kilo(used)} token，深读预计还要约 "
+                f"{kilo(need)}，会超出 llm.daily_token_budget（{kilo(budget)}）"
+            )
+            continue
+        try:
+            fulltext = (fetcher or FulltextFetcher()).fetch(paper)
+        except Exception as e:  # 全文解析出错也不能影响日报
+            logger.warning("自动深读获取 %s 的全文失败：%s", paper.id, e)
+            notes.append(f"第 {index} 篇没有自动深读：获取全文失败（{type(e).__name__}）")
+            continue
+        if not fulltext.sections:
+            notes.append(f"第 {index} 篇没有自动深读：没能获取全文和摘要")
+            continue
+        try:
+            report = deep_read(
+                paper,
+                fulltext,
+                llm=llm,
+                interests=interests,
+                config=config.deep_read,
+                language=config.language,
+                now=now,
+            )
+        except BudgetExceededError as e:
+            notes.append(f"第 {index} 篇没有自动深读：{e}")
+            continue
+        except LLMError as e:
+            logger.warning("自动深读 %s 失败：%s", paper.id, e)
+            notes.append(f"第 {index} 篇自动深读失败：{e}")
+            continue
+        save_report(store, report)
+        reports[paper.id] = report
+    return reports, notes
 
 
 def _sync_warnings(sync: SyncResult) -> list[str]:
@@ -275,7 +361,15 @@ def _repair(
     if saved is None or (existing is not None and saved.issue_number != existing.number):
         return DailyResult("already_published", existing=existing)
 
-    repaired = publisher.repair(saved) if publisher is not None else saved
+    repaired = saved
+    if publisher is not None:
+        # 补发的评论里也附上自动深读的报告：从缓存读取，不重新生成
+        reports = {
+            paper_id: report
+            for paper_id in saved.deep_reads
+            if (report := load_report(store, paper_id)) is not None
+        }
+        repaired = publisher.repair(saved, reports)
     retry = failed_channels(repaired, notifiers)
     notified = send_all(repaired, retry, now=now) if retry else {}
     if notified:

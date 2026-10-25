@@ -646,6 +646,8 @@ def _report_body(result: DailyResult, missing: int) -> str:
         lines.append(f"\n{digest.overview}")
     for index, paper in enumerate(digest.papers, start=1):
         lines.append("\n" + _format_paper(index, paper))
+        if paper.id in digest.deep_reads:
+            lines.append(f"    🔍 已自动深读：报告附在评论里，并写入 reports/{paper.id}.md")
     lines.append("\n" + stats_line(digest.stats).replace("<br>", ""))
     return "\n".join(lines).lstrip("\n")
 
