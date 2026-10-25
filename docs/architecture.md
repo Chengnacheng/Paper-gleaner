@@ -145,8 +145,8 @@ flowchart LR
 | 2. 去重与规则过滤 | 排除已处理过的 ID；默认排除 replace 版本；支持关键词白名单（必推）和黑名单（必不推） |
 | 3. 向量粗筛 | 计算每篇论文与「兴趣锚点」的综合相似度，保留 Top K（默认 50），详见 3.1.1 |
 | 4. LLM 精排 | LLM 分批打分并生成相关理由，保留分数不低于阈值的 Top N（默认 10），详见 3.1.2 |
-| 5. 自动深读 | 对分数最高的 M 篇（默认 1，可设为 0）预先生成深读报告，附在对应评论里 |
-| 6. 发布 | 创建当日 Issue：正文是总览，每篇论文单独一条评论（方便逐篇点 👍/👎）；同时向已启用的渠道发送摘要和 Issue 链接 |
+| 5. 自动深读 | 对分数最高的 M 篇（默认 1，可设为 0）预先生成深读报告，附在对应评论里（实现见 [13.3](#133-phase-4-实现说明)） |
+| 6. 发布 | 创建当日 Issue：正文是总览，每篇论文单独一条评论（方便逐篇点 👍/👎）；然后向已启用的渠道发送摘要和 Issue 链接 |
 | 7. 持久化 | 写入当日 digest（全部 Top K 候选、分数、理由、Issue 与评论 ID 的映射）、已处理 ID、运行统计，提交到 `gleaner-data` 分支 |
 
 #### 3.1.1 兴趣锚点与粗筛打分
@@ -158,7 +158,7 @@ flowchart LR
 | A1 兴趣描述 | `profile/interests.md`（用户手写） | 首次运行时由 LLM 拆解成若干子方向，每个子方向生成一段英文检索描述。结果按源文件 hash 缓存，描述改动后自动重建。这一步同时解决了「中文描述 vs 英文论文」的跨语言匹配问题 |
 | A2 正反馈论文 | 👍、`/like`、`/deep` 过的论文 | 用标题 + 摘要生成向量 |
 | A3 负反馈论文 | 👎、`/dislike` 过的论文，`/mute` 的主题 | 作为惩罚项 |
-| A4 Zotero 文献库 | 可选 | 兼容 zotero-arxiv-daily 的用法 |
+| A4 Zotero 文献库 | 可选 | 兼容 zotero-arxiv-daily 的用法。用标题 + 摘要生成向量，文库内容只缓存在 Actions 缓存里（见 13.3） |
 
 综合分数（权重在配置中可调）：
 
@@ -171,11 +171,12 @@ score(p) = w_interest · max_i cos(p, A1_i)
 
 冷启动时只有 A1；反馈越多，A2/A3 的影响越大。
 
-Phase 3 的具体定义（A4 还没有接入）：
+具体定义（Phase 3 接入反馈锚点，Phase 4 接入 Zotero）：
 
 ```text
 score(p) = w_interest · max_i cos(p, A1_i)
          + w_pos      · mean_top3_j (d_j · cos(p, A2_j))
+         + w_zotero   · mean_top3_l cos(p, A4_l)
          − w_neg      · max_k (d_k · cos(p, A3_k))
 
 d = 信号强度 × 0.5^(距最近一次有效反馈的天数 / feedback_half_life_days)
@@ -185,8 +186,9 @@ d = 信号强度 × 0.5^(距最近一次有效反馈的天数 / feedback_half_li
 - **mean_top3**：先把每个正反馈锚点的相似度乘上它的权重 d，取最大的 3 个求平均，不足 3 个按 0 计。一两次反馈只有部分影响，同一方向的反馈越多、越新，影响越大，不会因为点了一个 👍 就让推荐跑偏；
 - **A3** 包括兴趣描述中明确不感兴趣的方向（权重 1）、`/mute` 的屏蔽主题（用英文检索描述生成向量，权重 1，不衰减）和负反馈论文（权重同上），取加权后最接近的一个；
 - 每类反馈锚点最多取权重最高的 200 篇；只有 arXiv ID、没有标题和摘要的反馈（arXiv API 不可用时记下的）不参与；
-- 没有任何反馈和屏蔽主题时，分数与只用 A1 时完全相同；
-- 每篇候选都记录分项（`interest_score`、`positive_score`、`negative_score`，均已乘过权重），`gleaner daily --dry-run` 会打印出来，用来观察反馈是否生效。
+- **A4**：从 Zotero 文库中选出的文献（最多 `profile.zotero.max_items` 篇，默认 200，选取规则见 13.3），用标题 + 摘要生成向量，和 A2 一样放在嵌入列表的最后。不做时间衰减，同样取最相似的 3 个求平均、不足 3 个按 0 计；
+- 没有任何反馈、屏蔽主题和 Zotero 锚点时，分数与只用 A1 时完全相同（未启用 Zotero 时逐位相同，有测试用旧实现在随机向量上对比）；
+- 每篇候选都记录分项（`interest_score`、`positive_score`、`zotero_score`、`negative_score`，均已乘过权重），`gleaner daily --dry-run` 会打印出来，用来观察反馈和 Zotero 是否生效。
 
 #### 3.1.2 LLM 精排
 
@@ -390,9 +392,10 @@ class Paper(BaseModel):
 class ScoredPaper(Paper):
     coarse_score: float | None
     coarse_match: str | None  # 向量最接近的兴趣子方向
-    interest_score: float | None  # 粗筛分项：兴趣、正反馈、负向（Phase 3）
+    interest_score: float | None  # 粗筛分项：兴趣、正反馈、负向（Phase 3）、Zotero（Phase 4）
     positive_score: float | None
     negative_score: float | None
+    zotero_score: float | None
     forced: bool  # 命中 include_keywords，跳过了粗筛
     llm_score: int | None  # None 表示精排失败或未精排
     matched_interests: list[str]
@@ -428,6 +431,7 @@ paper-gleaner/
 ├── gleaner/
 │   ├── cli.py                    # typer CLI：check / daily / handle-comment / digest / deep / compare / ask / feedback / summarize-preferences / ...
 │   ├── config.py                 # 读取 config.yaml 与环境变量，pydantic 校验
+│   ├── redaction.py              # 密钥脱敏（Webhook 地址、SMTP 密码等不进日志和错误信息）
 │   ├── models.py                 # Paper / ScoredPaper / Digest / Feedback / DeepReport
 │   ├── filters.py                # 去重与关键词过滤
 │   ├── mcp_server.py             # MCP Server（stdio，命令 gleaner-mcp）
@@ -439,7 +443,7 @@ paper-gleaner/
 │   │   ├── base.py               # Source 协议，方便以后接入 OpenReview 等
 │   │   ├── arxiv.py
 │   │   ├── semantic_scholar.py
-│   │   └── zotero.py
+│   │   └── zotero.py             # Zotero Web API v3：读取文库、缓存、去重和选取锚点
 │   ├── profile/
 │   │   ├── anchors.py            # 兴趣描述 → 子方向 / 检索描述
 │   │   ├── memory.py             # 反馈读写与聚合、偏好总结
@@ -462,7 +466,8 @@ paper-gleaner/
 │   │   ├── client.py             # OpenAI 兼容客户端、重试、token 统计与预算
 │   │   └── prompt.py             # token 估算、不可信内容的包裹（各处 prompt 共用）
 │   ├── notify/
-│   │   ├── base.py               # Notifier 接口
+│   │   ├── base.py               # Notifier 接口、公用的文本工具
+│   │   ├── dispatch.py           # 创建已启用的渠道、逐个发送并记录结果
 │   │   ├── github_issue.py
 │   │   ├── email.py
 │   │   ├── feishu.py
@@ -528,6 +533,10 @@ profile:
   interests_file: profile/interests.md
   zotero:
     enabled: false                 # 启用时需要 ZOTERO_ID / ZOTERO_KEY
+    library_type: user             # user | group
+    collections: []                # 名称或 key；为空时使用整个文库
+    include_subcollections: true
+    max_items: 200
 
 filters:
   include_keywords: []             # 命中即进入精排
@@ -564,9 +573,9 @@ notify:
     enabled: true
     per_paper_comment: true        # 每篇论文一条评论，便于逐篇反馈
     close_after_days: 7            # 关闭旧日报（关闭后仍可评论交互）
-  email:  {enabled: false}
-  feishu: {enabled: false}
-  wecom:  {enabled: false}
+  email:  {enabled: false, subject_prefix: "📚 Paper Gleaner"}
+  feishu: {enabled: false, max_papers: 10}
+  wecom:  {enabled: false, max_papers: 5}
 ```
 
 **GitHub Secrets**
@@ -576,13 +585,15 @@ notify:
 | `LLM_API_KEY` | ✅ | LLM 服务的 API Key |
 | `LLM_BASE_URL` | 可选 | 覆盖配置文件中的 `base_url` |
 | `EMBEDDING_API_KEY` | 嵌入使用 API 时可选 | 未设置时沿用 `LLM_API_KEY` |
-| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASSWORD` / `EMAIL_TO` | 启用邮件时 | |
-| `FEISHU_WEBHOOK` / `FEISHU_SECRET` | 启用飞书时 | 自定义机器人地址与签名密钥 |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASSWORD` / `EMAIL_TO` | 启用邮件时 | `SMTP_PORT` 可选，默认 465（SSL），其它端口走 STARTTLS；`SMTP_PASSWORD` 填邮箱的授权码或应用专用密码；`EMAIL_TO` 多个地址用逗号分隔 |
+| `FEISHU_WEBHOOK` / `FEISHU_SECRET` | 启用飞书时 | 自定义机器人地址与签名密钥；`FEISHU_SECRET` 可选，但建议开启签名校验 |
 | `WECOM_WEBHOOK` | 启用企业微信时 | 群机器人地址 |
-| `ZOTERO_ID` / `ZOTERO_KEY` | 启用 Zotero 时 | |
+| `ZOTERO_ID` / `ZOTERO_KEY` | 启用 Zotero 时 | 用户 ID 或群组 ID（与 `profile.zotero.library_type` 对应），以及有读取权限的 API Key |
 | `S2_API_KEY` | 可选 | 提高 Semantic Scholar 的请求限额 |
 
 `GITHUB_TOKEN` 由 Actions 自动提供，不需要用户配置。模型名也可以不改配置文件，在仓库的 Actions variables 中设置 `LLM_FAST_MODEL`、`LLM_DEEP_MODEL` 覆盖。
+
+以上密钥只从环境变量读取：写在 `config.yaml` 里会直接报错（`config.yaml` 提交在公开的 fork 中）。Webhook 地址本身就是密钥，和 SMTP 密码、收件人地址、Zotero 的 ID 与 Key 一样，不会出现在日志、异常信息、运行摘要和回复里。
 
 ---
 
@@ -601,6 +612,7 @@ on:
     inputs:
       dry_run: {type: boolean, default: false}   # 只运行不发布；没有新公告时改用最近 20 篇论文
       force: {type: boolean, default: false}     # 当天日报已存在时仍重新生成
+      notify_test: {type: boolean, default: false}   # 只给已启用的推送渠道各发一条测试消息（Phase 4）
 
 permissions:
   contents: write              # 写 gleaner-data 分支
@@ -611,7 +623,8 @@ concurrency:
   cancel-in-progress: false
 ```
 
-- 使用 `actions/cache` 缓存 uv 依赖和嵌入模型权重（`~/.cache/paper-gleaner`）；
+- 使用 `actions/cache` 缓存 uv 依赖和嵌入模型权重（`~/.cache/paper-gleaner/models`）；启用 Zotero 时另外缓存文库（`~/.cache/paper-gleaner/zotero`，见 13.3）；
+- 推送渠道和 Zotero 的 Secrets 只注入到运行日报的那一步；`timeout-minutes` 为 45（自动深读可能要十几分钟）；
 - 以 `github-actions[bot]` 身份提交 gleaner-data 分支，凭据来自 `actions/checkout` 保存的 `GITHUB_TOKEN`；
 - 运行结束后把统计（抓取数、精排数、推送数、token 用量、耗时）写入 `$GITHUB_STEP_SUMMARY`；
 - 幂等：当日 Issue 已存在时直接跳过，除非手动触发并设置 `force`。
@@ -670,14 +683,19 @@ concurrency:
 
 ## 9. 推送渠道
 
-所有渠道实现统一的 `Notifier.send(digest)` 接口。各渠道相互独立，某个渠道失败不影响其它渠道。**交互统一在 GitHub Issue 中进行**，其它渠道只发摘要和 Issue 链接。
+所有渠道实现统一的 `Notifier.send(digest)` 接口。各渠道相互独立，某个渠道失败不影响其它渠道，也不影响日报，只在运行结果中给出警告。**交互统一在 GitHub Issue 中进行**，其它渠道只发摘要和 Issue 链接。
 
 | 渠道 | 形式 | 说明 |
 | --- | --- | --- |
 | GitHub Issue（主界面） | 标题如 `📚 Paper Gleaner · 2026-10-24 · 10 篇`，带 `gleaner`、`daily` 标签 | 正文：今日概览（LLM 用三句话总结趋势）+ 目录表（序号、标题、分数、匹配兴趣）+ 指令速查；每篇论文一条评论（示例见[附录](#附录日报评论示例)） |
-| 邮件 | HTML 简版 | 标题、相关理由、TL;DR、Issue 链接；SMTP 支持 QQ、163、Gmail 等邮箱的授权码 |
-| 飞书 | 自定义机器人 + 签名校验 | 消息卡片列出论文，附「去 Issue 讨论」按钮 |
-| 企业微信 | 群机器人 markdown 消息 | 受消息长度限制，只发 Top 5 摘要和链接 |
+| 邮件 | HTML 简版 + 纯文本备用版 | 标题、相关理由、TL;DR、Issue 链接；465 端口走 SSL，其它端口走 STARTTLS；支持 QQ、163、Gmail 等邮箱的授权码；标题和正文都用 UTF-8 |
+| 飞书 | 自定义机器人 + 签名校验 | 消息卡片列出论文（默认最多 10 篇，请求体不超过 20 KB），附「去 Issue 讨论」按钮 |
+| 企业微信 | 群机器人 markdown 消息 | content 最多 4096 字节，只发 Top 5 摘要和链接 |
+
+- **发送时机**：日报 Issue 发布成功后发送；没有达到 `min_score` 的论文、没有新公告和 dry-run 都不发送。没有启用 GitHub Issue 时照样发送，只是不带链接；
+- **只发一次**：各渠道的发送结果记在当天的 digest 里，11:30 的兜底运行只补发上次失败的渠道；
+- **转义**：标题、理由等外部文本由各渠道自己转义，邮件里不能注入 HTML，飞书里不能 `<at>` 人，企业微信里不能写 `<@userid>`（做法见 13.3）；
+- **验证**：配置好后运行 `gleaner notify-test`（或 Daily workflow 的 `notify_test` 开关），给已启用的渠道各发一条测试消息；`gleaner check` 报告各渠道的配置状态。
 
 ---
 
@@ -718,7 +736,9 @@ concurrency:
 | 评论超长 | GitHub 评论上限为 65536 字符，超长报告拆成多条 |
 | 定时任务延迟 | GitHub cron 高峰期可能延迟，用兜底时间点和幂等检查保证当天必发且只发一次 |
 | 定时任务被停用 | 公开仓库长期无活动时 GitHub 会自动停用定时 workflow，需要在 README 中提示用户，并评估保活方案 |
-| 日志泄露 | 默认不在日志中打印 prompt 全文和 Secrets，调试模式下才输出 prompt |
+| 日志泄露 | 默认不在日志中打印 prompt 全文和 Secrets，调试模式下才输出 prompt。Webhook 地址、SMTP 密码、收件人地址、Zotero 的 ID 和 Key 只从环境变量读取：推送渠道和 Zotero 客户端不保留带着请求地址的原始异常，错误信息先脱敏；httpx 记录请求地址的日志也经过过滤 |
+| 推送内容注入 | 外部文本按渠道转义：邮件做 HTML 转义；飞书只放进 plain_text 元素；企业微信合并成一行并去掉 markdown 和标签字符 |
+| Zotero 文库隐私 | 文库内容只放在 Actions 缓存里，不提交到任何分支，也不出现在 Issue、日志和推送消息中；运行摘要只显示数量 |
 
 ---
 
@@ -773,7 +793,7 @@ Phase 1 完成后项目就已经比现有方案好用（可解释的推荐 + 不
 | 表情 | 👀 和 🚀 由 `gleaner handle-comment` 添加（而不是 workflow 的单独步骤）；出错时加 😕 |
 | 回复 | 超过约 60000 字符时拆成多条评论，断在空行处，必要时闭合再重新打开代码块和 `<details>`；外部文本一律转义，模型输出保留 `>` 引用块但转义 `<` |
 | 反馈 | `/deep`、`/compare` 作为 +0.5 的隐式反馈写入 `feedback/<YYYY-MM>.jsonl`，Phase 3 再读取（已接入，见 13.2） |
-| 自动深读 | `deep_read.auto_top_m` 还没有接入日报 |
+| 自动深读 | `deep_read.auto_top_m` 还没有接入日报（Phase 4 已接入，见 13.3） |
 | 失败降级 | arXiv、Semantic Scholar、LLM 失败都不让指令崩溃：LLM 失败时回复摘要和代码链接；全文获取失败时基于摘要分析并注明；只有序号越界、参数写错等用户能修正的问题才回复错误原因 |
 
 ### 13.2 Phase 3 实现说明
@@ -792,7 +812,7 @@ Phase 1 完成后项目就已经比现有方案好用（可解释的推荐 + 不
 | 可观察的变化 | 每篇候选记录粗筛分项（兴趣、正反馈、负向），`gleaner daily --dry-run` 打印出来；日报 Issue 的「本次运行」里列出 👍、👎、`/like`、`/dislike`、`/deep`/`/compare` 各多少篇，正负反馈锚点和屏蔽主题各多少，以及本次同步了几条表情、同步是否失败；`gleaner feedback` 在本地查看聚合结果 |
 | `learned_preferences.md` | 格式见下。只由 `gleaner summarize-preferences`（weekly.yml）写入；输入是当前文件（含用户手改的内容）、`interests.md`（只读）和上次总结之后收到新反馈的论文（信号、原因、标题、截断到 300 字符的摘要），按「带原因的显式反馈 > 显式反馈 > 表情 > 隐式反馈」排序，总输入不超过约 12k token；模型只返回新的正文（≤ 3000 字符），失败时保留旧文件。用户把正文写到超过 3000 字符时不更新，提示先精简，避免模型删掉用户的内容 |
 | 精排注入 | 学到的偏好（去掉 HTML 注释、截断到约 1500 token）和屏蔽主题的原文按不可信数据包裹后加进精排的 system prompt；两者都没有时 prompt 不变 |
-| 未做 | 周报 Issue；「新增反馈达到 N 条时触发」偏好总结；用「与用户历史的向量近邻」增强 `/compare`；自动深读（`deep_read.auto_top_m`）仍未接入日报 |
+| 未做 | 周报 Issue；「新增反馈达到 N 条时触发」偏好总结；用「与用户历史的向量近邻」增强 `/compare`；自动深读（`deep_read.auto_top_m`）仍未接入日报（Phase 4 已接入，见 13.3） |
 
 **`learned_preferences.md` 格式**
 
@@ -813,7 +833,48 @@ Phase 1 完成后项目就已经比现有方案好用（可解释的推荐 + 不
 
 ### 13.3 Phase 4 实现说明
 
-与上文设计不同或做了取舍的地方：
+Phase 4 分两步合并：先是推送渠道、日报自动深读和 Zotero，再是 `/ask`、MCP Server 和 Claude Code Skill。与上文设计不同或做了取舍的地方：
+
+**推送渠道**
+
+| 项目 | 实现 |
+| --- | --- |
+| 接口 | `notify/base.py` 的 `Notifier.send(digest, test=False)`；`notify/dispatch.py` 逐个渠道发送，任何异常（包括渠道自身的 bug）都只记为这个渠道失败，其它渠道照常发送，日报照常完成，失败原因进入 `DailyResult.warnings`（Actions 中显示为黄色警告） |
+| 发送结果 | digest 新增 `notifications`（渠道名 → `sent` / `failed`、脱敏后的错误、时间），旧的 digest 读取时取默认值。兜底运行（以及没有启用 Issue 时的重复运行）只补发状态为 `failed` 的渠道；成功过的和发布时还没启用的渠道都不发 |
+| 没有启用 Issue | 照样推送，消息中注明不能评论交互；是否已经推送过按当天 digest 里的 `notifications` 判断 |
+| 邮件 | `smtplib`：465 端口 `SMTP_SSL`，其它端口 `SMTP` + `STARTTLS`，都校验证书。正文是 HTML 简版加纯文本备用版，两部分都用 UTF-8 + base64，标题按 RFC 2047 编码；外部文本一律 `html.escape`，链接只用 arXiv 和日报 Issue 的地址。认证失败时提示「授权码 / 应用专用密码」；其它错误去掉密码、账号和收件人地址，不保留原始异常 |
+| 飞书 | 签名：以 `timestamp + "\n" + secret` 为密钥、对空消息做 HMAC-SHA256，再 base64（飞书文档中的算法）；没有 `FEISHU_SECRET` 时不签名。消息卡片中外部文本只放进 `plain_text` 元素，不经 Markdown 解析，保险起见再在 `<` 后插入零宽空格；`lark_md` 元素里只有程序拼出的 arXiv 链接。请求体（紧凑的 UTF-8 JSON）超过约 19 KB 时减少列出的篇数并注明「另有 N 篇」。返回体的 `code`（旧接口为 `StatusCode`）不为 0 都算失败，常见错误码（19021 签名、19022 IP 白名单、19024 关键词、11232 限流）给出处理建议 |
+| 企业微信 | markdown 消息：只发前 `max_papers`（默认 5）篇；UTF-8 编码后超过 4096 字节时先把理由截得更短，再减少篇数。外部文本合并成一行（不能借换行写出标题或引用），方括号、星号换成全角字符，反引号换成单引号，`<` 后插入零宽空格，因此不能 `<@userid>`、插入链接或 `<font>`。`errcode` 不为 0 都算失败（93000、45009 给出建议） |
+| 密钥 | 全部只从环境变量读取，`config.yaml` 里写了 `webhook`、`secret`、`smtp_password` 等字段会报错。Webhook 地址本身就是密钥：httpx 的异常信息带着请求地址，所以渠道把异常转成脱敏后的说明（`raise ... from None`，不留异常链）；`gleaner/redaction.py` 还给 httpx 的日志加了过滤器（`-v` 时 httpx 会打印请求地址）。公开仓库的 Actions 日志任何人都能看，收件人地址也一并脱敏 |
+| 测试消息 | `gleaner notify-test [--channel email\|feishu\|wecom]` 用一份示例日报（标题带「【测试】」）给已启用的渠道各发一条；Daily workflow 的 `notify_test` 开关做同样的事，不运行日报 |
+| 没有做 | 飞书卡片 2.0（JSON 2.0 结构）；按渠道配置推送时间；企业微信的 `markdown_v2` |
+
+**日报自动深读**
+
+| 项目 | 实现 |
+| --- | --- |
+| 时机 | 精排、概览之后、发布之前，对推送的前 `deep_read.auto_top_m` 篇（默认 1，0 关闭）调用与 `/deep` 相同的 `deep_read()`（deep 档模型），共用当次运行的 `LLMClient`，token 计入 `RunStats` 和 `daily_token_budget` |
+| 附在评论里 | 报告以 `<details>` 折叠块附在对应论文评论的末尾（`gleaner:paper` 标记之前），经过 `sanitize_markdown`；整条评论不超过 65536 字符，超长时断在行尾截断、闭合代码块，并提示评论 `/deep N` 查看完整报告。`per_paper_comment: false` 时不附在正文里（正文长度有限），只写入缓存 |
+| 缓存 | 写入 `reports/<arxiv_id>.md`，随日报一起提交，之后 `/deep` 直接返回缓存；已有缓存时直接使用。自动深读不记隐式反馈（不是用户主动要的） |
+| 降级 | 全文获取（含解析出错）或 LLM 失败只跳过这一篇；剩余预算不够 `max_input_tokens` + 约 4000 输出时跳过。原因写进「本次运行」和运行结果的警告 |
+| 兜底运行 | 补发评论时从缓存读取报告附上，不重新生成；digest 新增 `deep_reads` 记录附了报告的论文 |
+| 超时 | daily.yml 的 `timeout-minutes` 从 30 改为 45：深读单次 LLM 调用超时 180 秒，SDK 还会重试 |
+
+**Zotero（A4）**
+
+| 项目 | 实现 |
+| --- | --- |
+| 接口 | httpx 直接调用 Zotero Web API v3，请求头 `Zotero-API-Key` 和 `Zotero-API-Version: 3`；个人文库前缀 `/users/<ZOTERO_ID>`，群组文库 `/groups/<ZOTERO_ID>`（`profile.zotero.library_type`） |
+| 读取范围 | 默认整个文库：`<前缀>/items/top?itemType=-attachment`。配置了 `collections`（名称或 key）时逐个读取 `<前缀>/collections/<key>/items/top`；这个接口不含子 collection 的条目，`include_subcollections`（默认 true）时根据 `<前缀>/collections` 返回的 `parentCollection` 找出各级子 collection 一并读取。名称先精确匹配、再忽略大小写匹配；重名时报错并列出各自的 key，提示改用 key |
+| 过滤 | 条目接口默认不含回收站（`includeTrashed` 默认为 0），不需要额外参数；返回后再按 `data.deleted` 过滤一遍，并去掉附件、笔记、标注、子条目和没有标题的条目 |
+| 去重 | 按 DOI、arXiv ID（取自 `archiveID`、URL、arXiv DOI 或 Extra 字段）、规范化后的标题依次判断；保留最新加入的那一条，合并所属的 collection，它没有摘要时用重复项的补上 |
+| 选取 | 每个 collection 内按 `dateAdded` 从新到旧，各 collection 之间轮流取（不属于任何 collection 的算一组，属于多个的只取一次，最近加过文献的 collection 排在前面），最多 `max_items`（默认 200）篇 |
+| 分页与限流 | 每页 100 条，用 `start` 翻页，直到达到 `Total-Results`。任何响应带 `Backoff` 时等够再发下一个请求；429 / 503 按 `Retry-After`（没有时指数退避）重试；要等超过 60 秒就放弃，改用缓存 |
+| 缓存 | 去重后的全部有效文献存在 `~/.cache/paper-gleaner/zotero/library-<范围指纹>.json`（指纹由文库类型、ID 和 collection 配置算出，配置改了缓存就作废）。每次先带 `If-Modified-Since-Version: <缓存的版本>` 请求一次，304 时直接用缓存；有变化时整体重新拉取。daily.yml 用 `actions/cache/restore` + `actions/cache/save` 保存这个目录，key 带 `run_id`（缓存命中后不会自动更新，所以每次另存一份） |
+| 降级 | 读取失败但有缓存时用缓存并警告；没有缓存时跳过 A4 并警告；collection 找不到或重名、缺少 `ZOTERO_ID` / `ZOTERO_KEY` 时同样跳过并说明原因。日报照常发出 |
+| 隐私 | 文库内容不进 gleaner-data（公开分支谁都能看），digest 只有每篇候选的 `zotero_score` 和 `RunStats.zotero` 中的数量；「本次运行」和终端只显示「Zotero：使用 200 / 1342 篇」这样的数量。错误信息不含文献标题、ZOTERO_ID 和 ZOTERO_KEY。注意：Actions 缓存不在任何分支上，但本仓库的 workflow 都能读取，包括你批准运行的 Pull Request 的 workflow |
+| 打分 | 见 3.1.1：`w_zotero · mean_top3 cos(p, A4)`，不做时间衰减；锚点文本是标题 + 摘要，放在嵌入列表的最后。为了证明未启用时结果不变，打分部分拆成 `ranking/coarse.py` 的 `coarse_scores()`，测试用 Phase 3 的实现在随机向量上逐位比较 |
+| `gleaner check` | 报告 Zotero 是否启用、密钥是否齐全、读取范围；不请求 Zotero（collection 名称在运行日报时才解析） |
 
 **`/ask`**
 
@@ -849,6 +910,14 @@ Phase 1 完成后项目就已经比现有方案好用（可解释的推荐 + 不
 | 文件 | `.claude/skills/paper-gleaner/SKILL.md`：frontmatter 写 `name` 和 `description`（说明什么时候用），正文说明怎样调用 `gleaner` CLI，包括在其它项目里用 `uv run --directory` 调用，以及「深读后结合当前代码库」的做法 |
 | `gleaner digest` | 新增的本地命令：`gleaner digest [--day YYYY-MM-DD] [--all]` 打印某一天的推送（默认最近一份），标出已有深读报告的论文；只读，同步失败时用本地数据。Skill 用它回答「今天推了什么」，不需要 MCP Server |
 | 项目级 Skill | 只在 Paper Gleaner 仓库中打开 Claude Code 时自动加载；想在其它项目中使用，可以把这个目录复制到 `~/.claude/skills/`（README 中说明） |
+
+**已经定下、与原设计不同的决定**
+
+- GitHub Issue 仍然是唯一的交互界面，邮件、飞书、企业微信只发摘要和 Issue 链接；
+- 推送渠道的密钥（含 SMTP_HOST、SMTP_PORT、EMAIL_TO）和 Zotero 的 ID / Key 都只能配置为 Secrets；
+- Zotero 文库内容只放在 Actions 缓存里，不提交到任何分支；
+- `/ask` 用 JSON 协议循环，不用原生 tool calling；Agent 工具全部只读，`/ask` 和 MCP Server 共用同一套实现；
+- MCP Server 的 `give_feedback` 是唯一的写操作，直接提交并推送 gleaner-data。
 
 ---
 

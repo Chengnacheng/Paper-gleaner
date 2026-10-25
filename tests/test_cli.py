@@ -34,6 +34,8 @@ runner = CliRunner()
 RSS_URL = "https://rss.arxiv.org/rss/cs.CL+cs.LG"
 API = "https://api.github.com/repos/o/r"
 SCORES = {"2610.00001": 9, "2610.00002": 7, "2610.00003": 4}
+# 自动深读会请求 arXiv 全文，CLI 测试中关掉（另有专门的测试）
+REPO_CONFIG = "sources:\n  arxiv:\n    categories: [cs.CL, cs.LG]\ndeep_read:\n  auto_top_m: 0\n"
 ENV_VARS = [
     "LLM_API_KEY",
     "LLM_BASE_URL",
@@ -46,9 +48,24 @@ ENV_VARS = [
     "GITHUB_REPOSITORY",
     "GITHUB_REPOSITORY_OWNER",
     "GITHUB_API_URL",
+    "GITHUB_SERVER_URL",
+    "GITHUB_ACTIONS",
     "GITHUB_STEP_SUMMARY",
     "GITHUB_EVENT_PATH",
     "S2_API_KEY",
+    "EMBEDDING_API_KEY",
+    "EMBEDDING_BASE_URL",
+    "SMTP_HOST",
+    "SMTP_PORT",
+    "SMTP_USER",
+    "SMTP_PASSWORD",
+    "EMAIL_TO",
+    "FEISHU_WEBHOOK",
+    "FEISHU_SECRET",
+    "WECOM_WEBHOOK",
+    "ZOTERO_ID",
+    "ZOTERO_KEY",
+    "GLEANER_ZOTERO_CACHE",
 ]
 
 
@@ -71,7 +88,7 @@ def repo(clone: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch, clean_en
     """以一个 git 仓库为工作目录，配置齐全，LLM 和嵌入模型换成假的。"""
     path = clone("repo")
     monkeypatch.chdir(path)
-    (path / "config.yaml").write_text("sources:\n  arxiv:\n    categories: [cs.CL, cs.LG]\n")
+    (path / "config.yaml").write_text(REPO_CONFIG)
     (path / "profile").mkdir()
     (path / "profile" / "interests.md").write_text("我研究长上下文推理。", encoding="utf-8")
     monkeypatch.setenv("LLM_API_KEY", "sk-test")
@@ -272,6 +289,121 @@ def test_daily_commits_synced_reactions_when_already_published(
     month = digest.day.strftime("%Y-%m")
     saved = git("show", f"gleaner-data:feedback/{month}.jsonl", cwd=git_remote)
     assert '"signal": "down"' in saved
+
+
+# --- 推送渠道 -------------------------------------------------------------------
+
+FEISHU = "https://open.feishu.cn/open-apis/bot/v2/hook/feishu-token-123"
+WECOM = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=wecom-key-456"
+CHANNELS_CONFIG = REPO_CONFIG + "notify:\n  feishu: {enabled: true}\n  wecom: {enabled: true}\n"
+
+
+def channel_env(path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (path / "config.yaml").write_text(CHANNELS_CONFIG)
+    monkeypatch.setenv("FEISHU_WEBHOOK", FEISHU)
+    monkeypatch.setenv("FEISHU_SECRET", "sign-secret")
+    monkeypatch.setenv("WECOM_WEBHOOK", WECOM)
+
+
+@respx.mock
+def test_notify_test_sends_to_enabled_channels(
+    workdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    channel_env(workdir, monkeypatch)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+    feishu = respx.post(FEISHU).mock(return_value=httpx.Response(200, json={"code": 0}))
+    wecom = respx.post(WECOM).mock(
+        return_value=httpx.Response(200, json={"errcode": 93000, "errmsg": "invalid webhook url"})
+    )
+
+    result = runner.invoke(app, ["notify-test"])
+
+    assert result.exit_code == 1, result.output
+    assert "✓ 飞书：测试消息已发送，请查收" in result.output
+    assert "✗ 企业微信：企业微信返回错误 93000：Webhook 地址无效" in result.output
+    card = json.loads(feishu.calls.last.request.content)["card"]
+    assert card["header"]["title"]["content"].startswith("【测试】📚 Paper Gleaner · ")
+    assert "https://github.com/o/r/issues?q=label%3Adaily" in json.dumps(card)
+    assert wecom.called
+    assert "feishu-token-123" not in result.output and "wecom-key-456" not in result.output
+
+    only = runner.invoke(app, ["notify-test", "--channel", "feishu"])
+    assert only.exit_code == 0, only.output
+    assert "企业微信" not in only.output
+
+
+def test_notify_test_reports_disabled_and_unknown_channels(workdir: Path) -> None:
+    result = runner.invoke(app, ["notify-test"])
+    assert result.exit_code == 1
+    assert "没有启用任何推送渠道" in result.output
+
+    result = runner.invoke(app, ["notify-test", "--channel", "email"])
+    assert result.exit_code == 1
+    assert "✗ 邮件没有启用：在 config.yaml 中设置 notify.email.enabled: true" in result.output
+
+    result = runner.invoke(app, ["notify-test", "--channel", "sms"])
+    assert result.exit_code == 1
+    assert "不认识的渠道：sms" in result.output
+
+
+def test_notify_test_reports_missing_secrets(workdir: Path) -> None:
+    (workdir / "config.yaml").write_text("notify:\n  feishu: {enabled: true}\n")
+
+    result = runner.invoke(app, ["notify-test"])
+
+    assert result.exit_code == 1
+    assert "✗ 飞书已启用但没有配置好，这次不发送：缺少环境变量 FEISHU_WEBHOOK" in result.output
+
+
+@respx.mock
+def test_daily_dry_run_does_not_notify(
+    repo: Path, rss_bytes: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    channel_env(repo, monkeypatch)
+    respx.get(RSS_URL).mock(return_value=httpx.Response(200, content=rss_bytes))
+    feishu = respx.post(FEISHU)
+    wecom = respx.post(WECOM)
+
+    result = runner.invoke(app, ["daily", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "[1] 9/10  2610.00001" in result.output
+    assert not feishu.called and not wecom.called
+    assert "推送：" not in result.output
+
+
+@respx.mock
+def test_daily_notifies_after_publishing(
+    repo: Path, rss_bytes: bytes, git_remote: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    channel_env(repo, monkeypatch)
+    github_env(monkeypatch)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    respx.get(RSS_URL).mock(return_value=httpx.Response(200, content=rss_bytes))
+    respx.get(f"{API}/issues").mock(return_value=httpx.Response(200, json=[]))
+    respx.post(f"{API}/labels").mock(return_value=httpx.Response(201, json={}))
+    respx.post(f"{API}/issues").mock(
+        return_value=httpx.Response(
+            201, json={"number": 5, "html_url": "https://github.com/o/r/issues/5"}
+        )
+    )
+    respx.post(f"{API}/issues/5/comments").mock(return_value=httpx.Response(201, json={"id": 1}))
+    feishu = respx.post(FEISHU).mock(return_value=httpx.Response(200, json={"code": 0}))
+    respx.post(WECOM).mock(side_effect=httpx.ConnectError(f"failed to connect {WECOM}"))
+
+    result = runner.invoke(app, ["daily"])
+
+    assert result.exit_code == 0, result.output
+    assert "✓ 已发布：https://github.com/o/r/issues/5" in result.output
+    assert "· 推送：飞书 ✓ · 企业微信 ✗" in result.output
+    assert "::warning::企业微信推送失败：请求企业微信机器人失败" in result.output
+    assert "wecom-key-456" not in result.output
+    card = json.loads(feishu.calls.last.request.content)["card"]
+    assert "https://github.com/o/r/issues/5" in json.dumps(card)
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+    saved = git("show", f"gleaner-data:history/digests/{today}.json", cwd=git_remote)
+    assert '"feishu": {\n      "status": "sent"' in saved
+    assert "wecom-key-456" not in saved
 
 
 # --- 反馈与偏好 -----------------------------------------------------------------
@@ -498,6 +630,43 @@ def test_check_passes_when_complete(workdir: Path, monkeypatch: pytest.MonkeyPat
     assert "✓ 兴趣描述" in result.output
     assert "✓ LLM_API_KEY" in result.output
     assert "cs.CL, cs.LG" in result.output
+
+
+def test_check_reports_channels(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (workdir / "profile").mkdir()
+    (workdir / "profile" / "interests.md").write_text("长上下文推理", encoding="utf-8")
+    (workdir / "config.yaml").write_text(
+        "notify:\n  github_issue: {enabled: false}\n"
+        "  email: {enabled: true}\n  feishu: {enabled: true}\n"
+    )
+    monkeypatch.setenv("LLM_API_KEY", "sk-test")
+    webhook = "https://open.feishu.cn/open-apis/bot/v2/hook/token-abc"
+    monkeypatch.setenv("FEISHU_WEBHOOK", webhook)
+    monkeypatch.setenv("WECOM_WEBHOOK", "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=k1")
+    monkeypatch.setenv("SMTP_HOST", "smtp.qq.com")
+
+    result = runner.invoke(app, ["check"])
+
+    assert result.exit_code == 1, result.output
+    assert "· GitHub Issue：未启用（其它渠道照样推送" in result.output
+    assert "✗ 邮件：已启用，但缺少环境变量 SMTP_USER、SMTP_PASSWORD、EMAIL_TO" in result.output
+    assert "✓ 飞书：已设置 Webhook；未设置 FEISHU_SECRET" in result.output
+    assert "· 企业微信：未启用（相关 Secret 已设置，把 notify.wecom.enabled 改为 true" in (
+        result.output
+    )
+    assert "gleaner notify-test" in result.output
+    assert "token-abc" not in result.output and "k1" not in result.output
+
+    monkeypatch.setenv("SMTP_USER", "me@qq.com")
+    monkeypatch.setenv("SMTP_PASSWORD", "auth-code")
+    monkeypatch.setenv("EMAIL_TO", "a@example.com,b@example.com")
+    monkeypatch.setenv("FEISHU_SECRET", "sign")
+    result = runner.invoke(app, ["check"])
+
+    assert result.exit_code == 0, result.output
+    assert "✓ 邮件：SMTP smtp.qq.com:465（SSL），收件人 2 个" in result.output
+    assert "✓ 飞书：已设置 Webhook，已开启签名校验" in result.output
+    assert "me@qq.com" not in result.output and "a@example.com" not in result.output
 
 
 def test_falls_back_to_example_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -752,3 +921,94 @@ def test_local_deep_reports_bad_refs(interact_repo: Path) -> None:
     result = runner.invoke(app, ["deep", "9"])
     assert result.exit_code == 1
     assert "序号 9 超出范围" in result.output
+
+
+@respx.mock
+def test_daily_dry_run_auto_deep_reads_first_paper(
+    repo: Path, rss_bytes: bytes, html_text: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (repo / "config.yaml").write_text(REPO_CONFIG.replace("auto_top_m: 0", "auto_top_m: 1"))
+    base = pipeline_llm(SCORES)
+    use_llm(
+        monkeypatch,
+        lambda request: (
+            DEEP_REPORT if "深读报告" in request["messages"][0]["content"] else base(request)
+        ),
+    )
+    respx.get(RSS_URL).mock(return_value=httpx.Response(200, content=rss_bytes))
+    html = respx.get(HTML_URL).mock(return_value=httpx.Response(200, text=html_text))
+
+    result = runner.invoke(app, ["daily", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert html.called
+    assert "    🔍 已自动深读：报告附在评论里，并写入 reports/2610.00001.md" in result.output
+    assert "自动深读 1 篇，报告附在对应论文的评论里" in result.output
+    assert "LLM 调用 4 次" in result.output
+
+
+ZOTERO_API = "https://api.zotero.org/users/1234567"
+
+
+@respx.mock
+def test_daily_dry_run_with_zotero(
+    repo: Path, rss_bytes: bytes, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (repo / "config.yaml").write_text(
+        REPO_CONFIG + "profile:\n  zotero: {enabled: true, max_items: 2}\n"
+    )
+    monkeypatch.setenv("ZOTERO_ID", "1234567")
+    monkeypatch.setenv("ZOTERO_KEY", "zotero-key-xyz")
+    cache = tmp_path / "zotero-cache"
+    monkeypatch.setenv("GLEANER_ZOTERO_CACHE", str(cache))
+    items = [
+        {
+            "key": f"ITEM000{i}",
+            "version": 3,
+            "data": {
+                "key": f"ITEM000{i}",
+                "itemType": "journalArticle",
+                "title": f"My library paper on attention {i}",
+                "abstractNote": "Attention kernels.",
+                "collections": [],
+                "dateAdded": f"2026-10-0{i + 1}T00:00:00Z",
+            },
+        }
+        for i in range(3)
+    ]
+    headers = {"Total-Results": "3", "Last-Modified-Version": "42"}
+    respx.get(f"{ZOTERO_API}/items/top").mock(
+        return_value=httpx.Response(200, json=items, headers=headers)
+    )
+    respx.get(RSS_URL).mock(return_value=httpx.Response(200, content=rss_bytes))
+
+    result = runner.invoke(app, ["daily", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "Zotero：使用 2 / 3 篇" in result.output
+    assert "+ Zotero " in result.output
+    assert "My library paper" not in result.output
+    assert "zotero-key-xyz" not in result.output and "1234567" not in result.output
+    assert list(cache.glob("library-*.json"))
+    data = repo / ".gleaner-data"
+    for path in data.rglob("*"):
+        if path.is_file() and ".git" not in path.parts:
+            assert "My library paper" not in path.read_text(encoding="utf-8"), path
+
+
+def test_check_reports_zotero(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (workdir / "config.yaml").write_text(
+        "profile:\n  zotero:\n    enabled: true\n    library_type: group\n"
+        "    collections: [Detection]\n"
+    )
+    result = runner.invoke(app, ["check"])
+    assert "✗ Zotero：已启用，但缺少环境变量 ZOTERO_ID、ZOTERO_KEY" in result.output
+
+    monkeypatch.setenv("ZOTERO_ID", "7654321")
+    monkeypatch.setenv("ZOTERO_KEY", "zotero-key-xyz")
+    result = runner.invoke(app, ["check"])
+    assert (
+        "✓ Zotero：群组文库，范围：collection Detection（含子 collection），最多取 200 篇作为锚点"
+        in result.output
+    )
+    assert "7654321" not in result.output

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
@@ -27,6 +28,27 @@ from pydantic import (
 
 DEFAULT_CONFIG_PATH = Path("config.yaml")
 EXAMPLE_CONFIG_PATH = Path("config.example.yaml")
+
+# 只能来自环境变量（GitHub Secrets）的配置项：配置文件中的位置 → 环境变量。
+# 除了模型中实际存在的字段，也列出几个容易写错的名字，给出更明确的提示
+_SECRET_FIELDS: dict[tuple[str, ...], str] = {
+    ("llm", "api_key"): "LLM_API_KEY",
+    ("ranking", "embedding", "api_key"): "EMBEDDING_API_KEY",
+    ("notify", "email", "smtp_host"): "SMTP_HOST",
+    ("notify", "email", "smtp_port"): "SMTP_PORT",
+    ("notify", "email", "smtp_user"): "SMTP_USER",
+    ("notify", "email", "smtp_password"): "SMTP_PASSWORD",
+    ("notify", "email", "password"): "SMTP_PASSWORD",
+    ("notify", "email", "to"): "EMAIL_TO",
+    ("notify", "feishu", "webhook"): "FEISHU_WEBHOOK",
+    ("notify", "feishu", "secret"): "FEISHU_SECRET",
+    ("notify", "wecom", "webhook"): "WECOM_WEBHOOK",
+    ("profile", "zotero", "library_id"): "ZOTERO_ID",
+    ("profile", "zotero", "id"): "ZOTERO_ID",
+    ("profile", "zotero", "api_key"): "ZOTERO_KEY",
+    ("profile", "zotero", "key"): "ZOTERO_KEY",
+}
+_EMAIL_SEPARATOR = re.compile(r"[\s,;，；]+")
 
 
 class ConfigError(Exception):
@@ -49,7 +71,22 @@ class SourcesConfig(_Section):
 
 
 class ZoteroConfig(_Section):
+    """Zotero 文库作为可选的兴趣锚点（docs 3.1.1 的 A4）。
+
+    文库内容只缓存在本机（Actions 缓存）里，不写进 gleaner-data。
+    """
+
     enabled: bool = False
+    # 个人文库为 user，群组文库为 group；ZOTERO_ID 相应地填用户 ID 或群组 ID
+    library_type: Literal["user", "group"] = "user"
+    # 限定范围的 collection，写名称或 key；为空时使用整个文库
+    collections: list[str] = Field(default_factory=list)
+    include_subcollections: bool = True
+    # 最多取多少篇作为锚点：按加入文库的时间从新到旧，在各 collection 之间轮流取
+    max_items: int = Field(200, ge=1)
+    # 只从环境变量 ZOTERO_ID / ZOTERO_KEY 读取
+    library_id: SecretStr | None = Field(default=None, exclude=True)
+    api_key: SecretStr | None = Field(default=None, exclude=True)
 
 
 class ProfileConfig(_Section):
@@ -130,15 +167,38 @@ class GithubIssueNotifyConfig(_Section):
     close_after_days: int | None = Field(7, ge=1)
 
 
-class ChannelConfig(_Section):
+class EmailNotifyConfig(_Section):
     enabled: bool = False
+    subject_prefix: str = "📚 Paper Gleaner"
+    # 以下只从环境变量读取：SMTP_HOST、SMTP_PORT（默认 465）、SMTP_USER、SMTP_PASSWORD、
+    # EMAIL_TO（多个地址用逗号分隔）。收件人地址也算隐私：公开仓库的 Actions 日志任何人都能看
+    smtp_host: str | None = Field(default=None, exclude=True)
+    smtp_port: int | None = Field(default=None, exclude=True)
+    smtp_user: SecretStr | None = Field(default=None, exclude=True)
+    smtp_password: SecretStr | None = Field(default=None, exclude=True)
+    to: list[str] = Field(default_factory=list, exclude=True)
+
+
+class FeishuNotifyConfig(_Section):
+    enabled: bool = False
+    max_papers: int = Field(10, ge=1)  # 卡片中最多列出的篇数（请求体还受飞书 20 KB 的限制）
+    # 只从环境变量 FEISHU_WEBHOOK / FEISHU_SECRET 读取；Webhook 地址本身就是密钥
+    webhook: SecretStr | None = Field(default=None, exclude=True)
+    secret: SecretStr | None = Field(default=None, exclude=True)
+
+
+class WecomNotifyConfig(_Section):
+    enabled: bool = False
+    max_papers: int = Field(5, ge=1)  # markdown 消息最多 4096 字节，只发前几篇和链接
+    # 只从环境变量 WECOM_WEBHOOK 读取
+    webhook: SecretStr | None = Field(default=None, exclude=True)
 
 
 class NotifyConfig(_Section):
     github_issue: GithubIssueNotifyConfig = Field(default_factory=GithubIssueNotifyConfig)
-    email: ChannelConfig = Field(default_factory=ChannelConfig)
-    feishu: ChannelConfig = Field(default_factory=ChannelConfig)
-    wecom: ChannelConfig = Field(default_factory=ChannelConfig)
+    email: EmailNotifyConfig = Field(default_factory=EmailNotifyConfig)
+    feishu: FeishuNotifyConfig = Field(default_factory=FeishuNotifyConfig)
+    wecom: WecomNotifyConfig = Field(default_factory=WecomNotifyConfig)
 
 
 class Config(_Section):
@@ -190,16 +250,7 @@ def load_config(path: Path, env: Mapping[str, str] | None = None) -> Config:
     raw = raw or {}
     if not isinstance(raw, dict):
         raise ConfigError(f"{path} 的顶层必须是键值对")
-    if isinstance(raw.get("llm"), dict) and "api_key" in raw["llm"]:
-        raise ConfigError(
-            "不要把 API Key 写进配置文件，请改用环境变量 LLM_API_KEY（GitHub Secret）"
-        )
-    ranking = raw.get("ranking")
-    embedding = ranking.get("embedding") if isinstance(ranking, dict) else None
-    if isinstance(embedding, dict) and "api_key" in embedding:
-        raise ConfigError(
-            "不要把 API Key 写进配置文件，请改用环境变量 EMBEDDING_API_KEY（GitHub Secret）"
-        )
+    _reject_secrets(raw)
 
     try:
         config = Config.model_validate(raw)
@@ -233,7 +284,51 @@ def load_config(path: Path, env: Mapping[str, str] | None = None) -> Config:
         config.ranking.embedding.api_key = SecretStr(api_key)
     if base_url := _first_env(env, ["EMBEDDING_BASE_URL"]):
         config.ranking.embedding.base_url = base_url
+    _load_channel_secrets(config.notify, env)
+    zotero = config.profile.zotero
+    if library_id := _first_env(env, ["ZOTERO_ID"]):
+        zotero.library_id = SecretStr(library_id)
+    if api_key := _first_env(env, ["ZOTERO_KEY"]):
+        zotero.api_key = SecretStr(api_key)
     return config
+
+
+def _reject_secrets(raw: dict[str, Any]) -> None:
+    """配置文件里写了密钥就报错：config.yaml 提交在公开的 fork 中。"""
+    for path, env_name in _SECRET_FIELDS.items():
+        node: Any = raw
+        for key in path[:-1]:
+            node = node.get(key) if isinstance(node, dict) else None
+        if isinstance(node, dict) and path[-1] in node:
+            raise ConfigError(
+                f"不要把密钥写进配置文件：{'.'.join(path)} 请删掉，"
+                f"改用环境变量 {env_name}（GitHub Secret）"
+            )
+
+
+def _load_channel_secrets(notify: NotifyConfig, env: Mapping[str, str]) -> None:
+    email = notify.email
+    if host := _first_env(env, ["SMTP_HOST"]):
+        email.smtp_host = host
+    if port := _first_env(env, ["SMTP_PORT"]):
+        if not port.isdigit() or not 0 < int(port) < 65536:
+            raise ConfigError("SMTP_PORT 必须是端口号，如 465（SSL）或 587（STARTTLS）")
+        email.smtp_port = int(port)
+    if user := _first_env(env, ["SMTP_USER"]):
+        email.smtp_user = SecretStr(user)
+    if password := _first_env(env, ["SMTP_PASSWORD"]):
+        email.smtp_password = SecretStr(password)
+    if recipients := _first_env(env, ["EMAIL_TO"]):
+        email.to = [item for item in _EMAIL_SEPARATOR.split(recipients) if item]
+        if invalid := [item for item in email.to if "@" not in item]:
+            # 不在报错信息里写出地址本身：这条信息可能出现在公开的 Actions 日志里
+            raise ConfigError(f"EMAIL_TO 中有 {len(invalid)} 个不是邮箱地址，多个地址用逗号分隔")
+    if webhook := _first_env(env, ["FEISHU_WEBHOOK"]):
+        notify.feishu.webhook = SecretStr(webhook)
+    if secret := _first_env(env, ["FEISHU_SECRET"]):
+        notify.feishu.secret = SecretStr(secret)
+    if webhook := _first_env(env, ["WECOM_WEBHOOK"]):
+        notify.wecom.webhook = SecretStr(webhook)
 
 
 def _first_env(env: Mapping[str, str], names: list[str]) -> str:

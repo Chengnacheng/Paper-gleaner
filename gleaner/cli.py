@@ -29,6 +29,15 @@ from gleaner.config import (
 from gleaner.llm import LLMClient, LLMError
 from gleaner.models import Digest, ScoredPaper
 from gleaner.notify import GitHubClient, GitHubError, IssuePublisher
+from gleaner.notify.base import (
+    CHANNEL_LABELS,
+    CHANNELS,
+    DEFAULT_SMTP_PORT,
+    ChannelName,
+    missing_settings,
+    sample_digest,
+)
+from gleaner.notify.dispatch import build_notifiers, results_line, send_all
 from gleaner.pipelines.daily import DailyResult, digest_path, run_daily
 from gleaner.pipelines.interact import (
     CommentEvent,
@@ -54,6 +63,7 @@ from gleaner.reader import FulltextFetcher, report_path
 from gleaner.render import sanitize, stats_line
 from gleaner.render.replies import code, short_error
 from gleaner.sources import ArxivSource, SemanticScholar, SourceError
+from gleaner.sources.zotero import ZoteroLibrary
 from gleaner.store import DataBranch, DataBranchError, DataStore
 
 app = typer.Typer(
@@ -143,6 +153,12 @@ def check(
     models = config.llm.models
     typer.echo(f"· LLM：{config.llm.base_url}（fast={models.fast}，deep={models.deep}）")
     typer.echo(f"· arXiv 分类：{', '.join(config.sources.arxiv.categories)}")
+    channel_lines, channel_problems = _channel_status(config)
+    typer.echo("\n".join(channel_lines))
+    problems += channel_problems
+    zotero_line, zotero_problem = _zotero_status(config)
+    typer.echo(zotero_line)
+    problems += zotero_problem
 
     if ping_llm and config.llm.api_key is not None:
         client = LLMClient(config.llm)
@@ -158,6 +174,70 @@ def check(
 
     if problems:
         raise typer.Exit(1)
+
+
+def _channel_status(config: Config) -> tuple[list[str], int]:
+    """各推送渠道的配置状态（不发送消息，验证请用 gleaner notify-test）。"""
+    notify = config.notify
+    lines = [
+        "· GitHub Issue：已启用"
+        if notify.github_issue.enabled
+        else "· GitHub Issue：未启用（其它渠道照样推送，但不带 Issue 链接，也不能评论交互）"
+    ]
+    problems = 0
+    for channel in CHANNELS:
+        label = CHANNEL_LABELS[channel]
+        missing = missing_settings(notify, channel)
+        if not getattr(notify, channel).enabled:
+            configured = "（相关 Secret 已设置，" if not missing else ""
+            if configured:
+                configured += f"把 notify.{channel}.enabled 改为 true 即可启用）"
+            lines.append(f"· {label}：未启用{configured}")
+        elif missing:
+            lines.append(f"✗ {label}：已启用，但缺少环境变量 {'、'.join(missing)}（GitHub Secret）")
+            problems += 1
+        else:
+            lines.append(f"✓ {label}：{_channel_detail(config, channel)}")
+    if any(getattr(notify, channel).enabled for channel in CHANNELS):
+        lines.append("  运行 gleaner notify-test 给已启用的渠道各发一条测试消息")
+    return lines, problems
+
+
+def _zotero_status(config: Config) -> tuple[str, int]:
+    """Zotero 的配置状态（不请求 Zotero；collection 名称在运行日报时才解析）。"""
+    zotero = config.profile.zotero
+    missing = [
+        name
+        for name, value in (("ZOTERO_ID", zotero.library_id), ("ZOTERO_KEY", zotero.api_key))
+        if value is None
+    ]
+    if not zotero.enabled:
+        return "· Zotero：未启用", 0
+    if missing:
+        return f"✗ Zotero：已启用，但缺少环境变量 {'、'.join(missing)}（GitHub Secret）", 1
+    library = "群组文库" if zotero.library_type == "group" else "个人文库"
+    scope = "整个文库"
+    if zotero.collections:
+        scope = "collection " + "、".join(zotero.collections)
+        scope += "（含子 collection）" if zotero.include_subcollections else "（不含子 collection）"
+    return f"✓ Zotero：{library}，范围：{scope}，最多取 {zotero.max_items} 篇作为锚点", 0
+
+
+def _channel_detail(config: Config, channel: str) -> str:
+    notify = config.notify
+    if channel == "email":
+        email = notify.email
+        port = email.smtp_port or DEFAULT_SMTP_PORT
+        mode = "SSL" if port == 465 else "STARTTLS"
+        return f"SMTP {email.smtp_host}:{port}（{mode}），收件人 {len(email.to)} 个"
+    if channel == "feishu":
+        if notify.feishu.secret is None:
+            return (
+                "已设置 Webhook；未设置 FEISHU_SECRET，"
+                "建议在机器人的安全设置中开启「签名校验」并把密钥配置为 Secret"
+            )
+        return "已设置 Webhook，已开启签名校验"
+    return f"已设置 Webhook，每次最多发 {notify.wecom.max_papers} 篇"
 
 
 # 日报运行中可预期的失败：打印原因后以退出码 1 结束，不打印调用栈
@@ -188,6 +268,8 @@ def daily(
     branch = DataBranch(Path.cwd(), data_dir)
     try:
         publisher = None if dry_run else _build_publisher(config)
+        # dry-run 不推送：不创建渠道
+        notifiers, notify_problems = ([], []) if dry_run else build_notifiers(config.notify)
         reactions, owner, skipped = _reaction_access(publisher)
         llm = LLMClient(config.llm)
         result = run_daily(
@@ -199,6 +281,8 @@ def daily(
             publisher=publisher,
             reactions=reactions,
             owner=owner,
+            notifiers=notifiers,
+            zotero=ZoteroLibrary(config.profile.zotero) if config.profile.zotero.enabled else None,
             force=force,
             sample_size=DRY_RUN_SAMPLE_SIZE if dry_run else None,
         )
@@ -212,7 +296,7 @@ def daily(
         raise typer.Exit(1) from e
 
     missing = _missing_comments(result, config)
-    warnings = ([skipped] if skipped else []) + result.warnings
+    warnings = ([skipped] if skipped else []) + notify_problems + result.warnings
     report = _report(result, missing, warnings)
     typer.echo(report)
     if os.environ.get("GITHUB_ACTIONS") == "true":
@@ -224,6 +308,62 @@ def daily(
     if summary_file := os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(summary_file, "a", encoding="utf-8") as f:
             f.write(f"## Paper Gleaner · {today.isoformat()}\n\n{report}\n")
+
+
+@app.command("notify-test")
+def notify_test(
+    channels: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--channel",
+            help="只测试这个渠道（email、feishu、wecom），可以写多次；默认测试全部已启用的渠道",
+        ),
+    ] = None,
+    config_path: ConfigOption = None,
+) -> None:
+    """给已启用的推送渠道（邮件、飞书、企业微信）各发一条测试消息，验证配置。"""
+    _, config = _load(config_path)
+    selected: list[ChannelName] | None = None
+    if channels:
+        unknown = [name for name in channels if name not in CHANNELS]
+        if unknown:
+            typer.echo(f"✗ 不认识的渠道：{'、'.join(unknown)}（可选 {'、'.join(CHANNELS)}）")
+            raise typer.Exit(1)
+        selected = [name for name in CHANNELS if name in channels]
+        disabled = [name for name in selected if not getattr(config.notify, name).enabled]
+        for name in disabled:
+            label = CHANNEL_LABELS[name]
+            typer.echo(f"✗ {label}没有启用：在 config.yaml 中设置 notify.{name}.enabled: true")
+        if disabled:
+            raise typer.Exit(1)
+    notifiers, problems = build_notifiers(config.notify, selected)
+    for problem in problems:
+        typer.echo(f"✗ {problem}")
+    if not notifiers and not problems:
+        typer.echo("✗ 没有启用任何推送渠道：在 config.yaml 的 notify 中启用 email、feishu 或 wecom")
+        raise typer.Exit(1)
+
+    today = datetime.now(ZoneInfo(config.timezone)).date()
+    results = send_all(
+        sample_digest(today, _issues_url()), notifiers, now=datetime.now(UTC), test=True
+    )
+    for name, outcome in results.items():
+        label = CHANNEL_LABELS[name]
+        if outcome.status == "sent":
+            typer.echo(f"✓ {label}：测试消息已发送，请查收")
+        else:
+            typer.echo(f"✗ {label}：{outcome.error}")
+    if problems or any(outcome.status == "failed" for outcome in results.values()):
+        raise typer.Exit(1)
+
+
+def _issues_url() -> str | None:
+    """测试消息里的「去 Issue 讨论」链接：在 Actions 中指向本仓库的日报列表。"""
+    repository = os.environ.get("GITHUB_REPOSITORY", "").strip()
+    if not repository:
+        return None
+    server = os.environ.get("GITHUB_SERVER_URL", "").strip() or "https://github.com"
+    return f"{server}/{repository}/issues?q=label%3Adaily"
 
 
 @app.command("handle-comment")
@@ -570,11 +710,20 @@ def _report(result: DailyResult, missing: int = 0, warnings: Sequence[str] = ())
 def _report_body(result: DailyResult, missing: int) -> str:
     warning = f"! 还有 {missing} 篇论文的评论没有发出去，{_REPAIR_HINT}。" if missing else ""
     url = result.existing.url if result.existing else ""
+    if not url and result.digest is not None:
+        url = result.digest.issue_url or ""
+    pushed = f"· {results_line(result.notified)}" if result.notified else ""
     if result.status == "already_published":
-        lines = [f"今天的日报已经发布：{url}", warning, "如需重新生成，请加 --force。"]
+        head = f"今天的日报已经发布：{url}" if url else "今天的日报已经推送过。"
+        lines = [head, warning, "如需重新生成，请加 --force。"]
         return "\n".join(line for line in lines if line)
     if result.status == "repaired":
-        return "\n".join(line for line in [f"✓ 已补发缺失的论文评论：{url}", warning] if line)
+        lines = []
+        if result.repaired_comments or not result.notified:
+            lines.append(f"✓ 已补发缺失的论文评论：{url}")
+        if result.notified:
+            lines.append(f"· 补发上次失败的渠道：{results_line(result.notified)}")
+        return "\n".join(line for line in [*lines, warning] if line)
     if result.status == "no_announcements":
         return "今天没有新公告（arXiv 周末和节假日不更新）。"
 
@@ -585,9 +734,11 @@ def _report_body(result: DailyResult, missing: int) -> str:
         count = digest.stats.fetched
         lines.append(f"今天没有新公告，改用最近提交的 {count} 篇论文试运行（只用于检查配置）。")
     if result.status == "published":
-        lines.append(f"✓ 已发布：{digest.issue_url}")
-        if warning:
-            lines.append(warning)
+        if digest.issue_url:
+            lines.append(f"✓ 已发布：{digest.issue_url}")
+        else:
+            lines.append("✓ 已推送（没有启用 GitHub Issue）")
+        lines += [line for line in (pushed, warning) if line]
     elif result.status == "nothing_relevant":
         lines.append("今天没有达到 min_score 的论文，未发布日报。")
     if digest.stats.degraded:
@@ -596,6 +747,8 @@ def _report_body(result: DailyResult, missing: int) -> str:
         lines.append(f"\n{digest.overview}")
     for index, paper in enumerate(digest.papers, start=1):
         lines.append("\n" + _format_paper(index, paper))
+        if paper.id in digest.deep_reads:
+            lines.append(f"    🔍 已自动深读：报告附在评论里，并写入 reports/{paper.id}.md")
     lines.append("\n" + stats_line(digest.stats).replace("<br>", ""))
     return "\n".join(lines).lstrip("\n")
 
@@ -613,12 +766,14 @@ def _format_paper(index: int, paper: ScoredPaper) -> str:
 
 
 def score_breakdown(paper: ScoredPaper) -> str:
-    """粗筛分数的分项，如「粗筛 0.912 = 兴趣 0.850 + 正反馈 0.120 − 负向 0.058」。"""
+    """粗筛分数的分项，如「粗筛 0.952 = 兴趣 0.850 + 正反馈 0.120 + Zotero 0.040 − 负向 0.058」。"""
     if paper.coarse_score is None or paper.interest_score is None:
         return ""
     text = f"粗筛 {paper.coarse_score:.3f} = 兴趣 {paper.interest_score:.3f}"
     if paper.positive_score is not None:
         text += f" + 正反馈 {paper.positive_score:.3f}"
+    if paper.zotero_score is not None:
+        text += f" + Zotero {paper.zotero_score:.3f}"
     if paper.negative_score is not None:
         text += f" − 负向 {paper.negative_score:.3f}"
     return text

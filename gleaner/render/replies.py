@@ -13,14 +13,16 @@ from typing import Literal
 
 from gleaner.models import DeepReport, Digest, Paper, ScoredPaper
 from gleaner.reader.fulltext import FullText, FulltextSource
-from gleaner.render.markdown import kilo, paper_link, sanitize, sanitize_markdown
+from gleaner.render.markdown import (
+    REPORT_SOURCE_NAMES,
+    kilo,
+    paper_link,
+    sanitize,
+    sanitize_markdown,
+)
 from gleaner.sources import RelatedPaper, RelatedWorks
 
-SOURCE_NAMES: dict[FulltextSource, str] = {
-    "html": "arXiv HTML",
-    "pdf": "PDF",
-    "abstract": "仅摘要",
-}
+SOURCE_NAMES: dict[FulltextSource, str] = REPORT_SOURCE_NAMES
 RELATION_NAMES = {"reference": "参考文献", "recommended": "推荐论文"}
 _ARXIV_ID_RE = re.compile(r"^\d{4}\.\d{4,5}$")
 _S2_URL_PREFIX = "https://www.semanticscholar.org/"
