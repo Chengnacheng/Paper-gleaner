@@ -43,6 +43,7 @@ ENV_VARS = [
     "OPENAI_BASE_URL",
     "GITHUB_TOKEN",
     "GITHUB_REPOSITORY",
+    "GITHUB_REPOSITORY_OWNER",
     "GITHUB_API_URL",
     "GITHUB_STEP_SUMMARY",
     "GITHUB_EVENT_PATH",
@@ -167,6 +168,104 @@ def test_daily_skips_when_already_published(
     assert "今天的日报已经发布：https://github.com/o/r/issues/4" in result.output
     assert rss.call_count == 0
     assert not data_branch_exists(git_remote)
+
+
+def seed_data(clone: Callable[[str], Path], *digests: Digest) -> None:
+    """在远端的 gleaner-data 分支上放几份日报。"""
+    seed_repo = clone("data-seed")
+    seed = DataBranch(seed_repo, seed_repo / ".gleaner-data", backoff_seconds=0)
+    store = seed.checkout()
+    for digest in digests:
+        store.write_model(digest_path(digest.day), digest)
+    seed.commit_and_push("data: seed digests")
+
+
+def todays_digest(**fields) -> Digest:
+    """今天（按配置的时区）已发布的日报，评论都在。"""
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    comment_ids = {"2610.00001": 801, "2610.00002": 802}
+    return interact_digest(**({"day": today, "comment_ids": comment_ids} | fields))
+
+
+def reactions_json(*items: tuple[str, str]) -> list[dict]:
+    return [
+        {"id": i, "user": {"login": login, "type": "User"}, "content": content}
+        for i, (login, content) in enumerate(items, start=1)
+    ]
+
+
+@respx.mock
+def test_daily_dry_run_syncs_reactions_without_committing(
+    repo: Path,
+    clone: Callable[[str], Path],
+    rss_bytes: bytes,
+    git_remote: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed_data(clone, todays_digest())
+    github_env(monkeypatch)
+    monkeypatch.setenv("GITHUB_REPOSITORY_OWNER", "Owner")
+    before = git("rev-parse", "gleaner-data", cwd=git_remote)
+    respx.get(RSS_URL).mock(return_value=httpx.Response(200, content=rss_bytes))
+    first = respx.get(f"{API}/issues/comments/801/reactions").mock(
+        return_value=httpx.Response(200, json=reactions_json(("owner", "+1"), ("bob", "-1")))
+    )
+    respx.get(f"{API}/issues/comments/802/reactions").mock(
+        return_value=httpx.Response(200, json=reactions_json(("bob", "+1")))
+    )
+
+    result = runner.invoke(app, ["daily", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert first.called
+    assert "· 同步了 1 条表情反馈" in result.output
+    assert "[1] 9/10  2610.00001" in result.output
+    assert git("rev-parse", "gleaner-data", cwd=git_remote) == before  # dry-run 不写数据
+
+
+@respx.mock
+def test_daily_dry_run_warns_without_github_env(repo: Path, rss_bytes: bytes) -> None:
+    respx.get(RSS_URL).mock(return_value=httpx.Response(200, content=rss_bytes))
+
+    result = runner.invoke(app, ["daily", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output.startswith("! 没有 GITHUB_TOKEN 和 GITHUB_REPOSITORY，跳过表情同步")
+
+
+@respx.mock
+def test_daily_commits_synced_reactions_when_already_published(
+    repo: Path,
+    clone: Callable[[str], Path],
+    git_remote: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    digest = todays_digest(issue_number=4)
+    seed_data(clone, digest)
+    github_env(monkeypatch)  # 没有 GITHUB_REPOSITORY_OWNER 时从 GITHUB_REPOSITORY 取出 owner
+    existing = {
+        "number": 4,
+        "title": f"📚 Paper Gleaner · {digest.day.isoformat()} · 2 篇",
+        "html_url": "https://github.com/o/r/issues/4",
+        "created_at": f"{digest.day.isoformat()}T01:30:00Z",
+    }
+    respx.get(f"{API}/issues").mock(return_value=httpx.Response(200, json=[existing]))
+    respx.get(f"{API}/issues/comments/801/reactions").mock(
+        return_value=httpx.Response(200, json=reactions_json(("O", "-1")))
+    )
+    respx.get(f"{API}/issues/comments/802/reactions").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+
+    result = runner.invoke(app, ["daily"])
+
+    assert result.exit_code == 0, result.output
+    assert "今天的日报已经发布" in result.output
+    message = git("log", "-1", "--format=%s", "gleaner-data", cwd=git_remote)
+    assert message == f"data: sync reactions {digest.day.isoformat()}"
+    month = digest.day.strftime("%Y-%m")
+    saved = git("show", f"gleaner-data:feedback/{month}.jsonl", cwd=git_remote)
+    assert '"signal": "down"' in saved
 
 
 def test_daily_requires_github_env(repo: Path) -> None:

@@ -6,6 +6,7 @@ import contextlib
 import logging
 import os
 import sys
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
@@ -175,6 +176,7 @@ def daily(
     branch = DataBranch(Path.cwd(), data_dir)
     try:
         publisher = None if dry_run else _build_publisher(config)
+        reactions, owner, skipped = _reaction_access(publisher)
         llm = LLMClient(config.llm)
         result = run_daily(
             config,
@@ -183,21 +185,30 @@ def daily(
             embedder=build_embedder(config),
             today=today,
             publisher=publisher,
+            reactions=reactions,
+            owner=owner,
             force=force,
             sample_size=DRY_RUN_SAMPLE_SIZE if dry_run else None,
         )
-        if not dry_run and result.status not in {"already_published", "no_announcements"}:
-            branch.commit_and_push(f"data: daily digest {today.isoformat()}")
+        if not dry_run:
+            if result.status not in {"already_published", "no_announcements"}:
+                branch.commit_and_push(f"data: daily digest {today.isoformat()}")
+            elif result.sync.records:
+                branch.commit_and_push(f"data: sync reactions {today.isoformat()}")
     except _DAILY_ERRORS as e:
         typer.echo(f"✗ {e}", err=True)
         raise typer.Exit(1) from e
 
     missing = _missing_comments(result, config)
-    report = _report(result, missing)
+    warnings = ([skipped] if skipped else []) + result.warnings
+    report = _report(result, missing, warnings)
     typer.echo(report)
-    if missing and os.environ.get("GITHUB_ACTIONS") == "true":
+    if os.environ.get("GITHUB_ACTIONS") == "true":
         # 在 Actions 运行页面显示为黄色警告
-        typer.echo(f"::warning::{missing} 篇论文的评论没有发出去，{_REPAIR_HINT}")
+        if missing:
+            typer.echo(f"::warning::{missing} 篇论文的评论没有发出去，{_REPAIR_HINT}")
+        for warning in warnings:
+            typer.echo(f"::warning::{warning}")
     if summary_file := os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(summary_file, "a", encoding="utf-8") as f:
             f.write(f"## Paper Gleaner · {today.isoformat()}\n\n{report}\n")
@@ -345,6 +356,28 @@ def _build_publisher(config: Config) -> IssuePublisher | None:
     return IssuePublisher(_github_client(), config.notify.github_issue)
 
 
+def _reaction_access(
+    publisher: IssuePublisher | None,
+) -> tuple[GitHubClient | None, str | None, str | None]:
+    """表情同步用的 GitHub 客户端和仓库所有者；无法同步时第三项是跳过的原因。
+
+    只统计仓库所有者的表情：优先取 GITHUB_REPOSITORY_OWNER，没有时（如本地运行）从
+    GITHUB_REPOSITORY 中取出 owner。
+    """
+    if publisher is not None:
+        github = publisher.github
+    else:
+        try:
+            github = _github_client()
+        except ConfigError:
+            return None, None, "没有 GITHUB_TOKEN 和 GITHUB_REPOSITORY，跳过表情同步"
+    owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
+    owner = owner or github.repository.partition("/")[0].strip()
+    if not owner:
+        return None, None, "无法确定仓库所有者（GITHUB_REPOSITORY_OWNER），跳过表情同步"
+    return github, owner, None
+
+
 def _github_client(repository: str = "") -> GitHubClient:
     token = os.environ.get("GITHUB_TOKEN", "").strip()
     repository = os.environ.get("GITHUB_REPOSITORY", "").strip() or repository
@@ -370,7 +403,15 @@ def _missing_comments(result: DailyResult, config: Config) -> int:
     return sum(1 for paper in digest.papers if paper.id not in digest.comment_ids)
 
 
-def _report(result: DailyResult, missing: int = 0) -> str:
+def _report(result: DailyResult, missing: int = 0, warnings: Sequence[str] = ()) -> str:
+    notes = "\n".join(f"! {warning}" for warning in warnings)
+    if result.sync.records:
+        notes = "\n".join(filter(None, [f"· 同步了 {result.sync.records} 条表情反馈", notes]))
+    body = _report_body(result, missing)
+    return f"{notes}\n{body}" if notes else body
+
+
+def _report_body(result: DailyResult, missing: int) -> str:
     warning = f"! 还有 {missing} 篇论文的评论没有发出去，{_REPAIR_HINT}。" if missing else ""
     url = result.existing.url if result.existing else ""
     if result.status == "already_published":

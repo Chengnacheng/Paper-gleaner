@@ -1,17 +1,24 @@
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from gleaner.config import Config
 from gleaner.filters import record_seen
-from gleaner.models import Digest, Paper
-from gleaner.notify import IssueRef
+from gleaner.models import Digest, Paper, ScoredPaper
+from gleaner.notify import GitHubError, IssueRef
 from gleaner.pipelines.daily import digest_path, run_daily
-from gleaner.profile import ProfileError
+from gleaner.profile import ProfileError, load_feedback
 from gleaner.sources.arxiv import parse_rss
 from gleaner.store import DataStore
-from tests.conftest import PIPELINE_VOCABULARY, KeywordEmbedder, fake_llm, pipeline_llm
+from tests.conftest import (
+    FIXTURES,
+    PIPELINE_VOCABULARY,
+    KeywordEmbedder,
+    fake_llm,
+    pipeline_llm,
+)
 
 TODAY = date(2026, 10, 26)
 SCORES = {"2610.00001": 9, "2610.00002": 7, "2610.00003": 4}
@@ -57,6 +64,38 @@ class FakePublisher:
     def close_stale(self, now: datetime | None = None) -> list[int]:
         self.closed += 1
         return []
+
+
+class FakeReader:
+    """代替 GitHubClient 读取评论表情；error 不为空时每次都抛出。"""
+
+    def __init__(self, reactions: dict[int, list[dict]] | None = None, error=None) -> None:
+        self.reactions = reactions or {}
+        self.error = error
+        self.calls: list[int] = []
+
+    def list_reactions(self, comment_id: int) -> list[dict[str, Any]]:
+        self.calls.append(comment_id)
+        if self.error is not None:
+            raise self.error
+        return self.reactions.get(comment_id, [])
+
+
+def thumbs(login: str, content: str) -> dict[str, Any]:
+    return {"id": 1, "user": {"login": login, "type": "User"}, "content": content}
+
+
+def seed_yesterday(store: DataStore) -> None:
+    """昨天的日报：一篇论文，评论 ID 为 501。"""
+    paper = ScoredPaper(id="2610.00009", title="Yesterday", abstract="KV cache again.")
+    yesterday = Digest(
+        day=date(2026, 10, 25),
+        generated_at=datetime(2026, 10, 25, 1, 30, tzinfo=UTC),
+        papers=[paper],
+        issue_number=6,
+        comment_ids={paper.id: 501},
+    )
+    store.write_model(digest_path(yesterday.day), yesterday)
 
 
 @pytest.fixture
@@ -269,3 +308,75 @@ def test_no_sampling_when_publishing(config: Config, papers: list[Paper], tmp_pa
 
     assert result.status == "no_announcements"
     assert source.recent_limits == []
+
+
+# --- 第 0 步：表情同步 -----------------------------------------------------------
+
+
+def test_syncs_reactions_first(config: Config, papers: list[Paper], tmp_path: Path) -> None:
+    store = DataStore(tmp_path)
+    seed_yesterday(store)
+    reader = FakeReader({501: [thumbs("Owner", "+1"), thumbs("someone", "-1")]})
+
+    result, _, _ = run(config, store, papers, reactions=reader, owner="owner")
+
+    assert reader.calls == [501]
+    assert (result.sync.records, result.sync.error, result.warnings) == (1, None, [])
+    assert [(r.paper_id, r.signal) for r in load_feedback(store, TODAY)] == [("2610.00009", "up")]
+    assert result.digest.stats.feedback.synced == 1
+
+
+def test_sync_failure_does_not_block_the_digest(
+    config: Config, papers: list[Paper], tmp_path: Path
+) -> None:
+    store = DataStore(tmp_path)
+    seed_yesterday(store)
+    reader = FakeReader(error=GitHubError("查询表情失败（HTTP 403）：rate limit", 403))
+
+    result, _, _ = run(config, store, papers, reactions=reader, owner="owner")
+
+    assert result.status == "preview"
+    assert [p.id for p in result.digest.papers] == ["2610.00001", "2610.00002"]
+    assert result.digest.stats.feedback.sync_error == "查询表情失败（HTTP 403）：rate limit"
+    [warning] = result.warnings
+    assert "表情同步没有完成" in warning and "rate limit" in warning
+    assert load_feedback(store, TODAY) == []
+
+
+def test_syncs_even_when_already_published(
+    config: Config, papers: list[Paper], tmp_path: Path
+) -> None:
+    store = DataStore(tmp_path)
+    seed_yesterday(store)
+    reader = FakeReader({501: [thumbs("owner", "-1")]})
+    publisher = FakePublisher(IssueRef(3, "https://x/3"))
+
+    result, _, source = run(
+        config, store, papers, publisher=publisher, reactions=reader, owner="owner"
+    )
+
+    assert result.status == "already_published"
+    assert source.calls == 0
+    assert result.sync.records == 1
+
+
+def test_skips_sync_without_reader(config: Config, papers: list[Paper], tmp_path: Path) -> None:
+    store = DataStore(tmp_path)
+    seed_yesterday(store)
+
+    result, _, _ = run(config, store, papers)
+
+    assert (result.sync.records, result.sync.error) == (0, None)
+    assert load_feedback(store, TODAY) == []
+
+
+def test_reads_phase2_digest() -> None:
+    # Phase 2 保存的 digest（没有反馈统计字段）仍能读取，新字段取默认值
+    text = (FIXTURES / "digest_phase2.json").read_text(encoding="utf-8")
+    digest = Digest.model_validate_json(text)
+
+    assert digest.issue_number == 1
+    assert digest.comment_ids == {"2610.19540": 6388934280, "2610.04922": 6388934591}
+    paper = digest.papers[0]
+    assert paper.coarse_score == 0.8093
+    assert digest.stats.feedback.empty

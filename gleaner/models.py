@@ -39,6 +39,28 @@ class ScoredPaper(Paper):
     tags: list[str] = Field(default_factory=list)
 
 
+class FeedbackStats(BaseModel):
+    """日报运行时的反馈概况，显示在 Issue 的「本次运行」中，用来观察反馈是否生效。
+
+    前几项是按论文计的当前状态（同一篇论文的重复反馈只算一次），见 profile/memory.py 的聚合规则。
+    """
+
+    up: int = 0  # 当前为 👍 的论文
+    down: int = 0  # 当前为 👎 的论文
+    like: int = 0  # 最新一条显式反馈为 /like 的论文
+    dislike: int = 0
+    implicit: int = 0  # /deep、/compare 过的论文
+    positive: int = 0  # 参与粗筛的正反馈锚点（A2）
+    negative: int = 0  # 参与粗筛的负反馈锚点（A3 中的论文）
+    muted: int = 0  # 当前屏蔽的主题
+    synced: int = 0  # 本次表情同步新写入的记录
+    sync_error: str | None = None  # 表情同步失败的原因
+
+    @property
+    def empty(self) -> bool:
+        return self == FeedbackStats()
+
+
 class RunStats(BaseModel):
     fetched: int = 0
     duplicates: int = 0
@@ -51,6 +73,7 @@ class RunStats(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     duration_seconds: float = 0.0
+    feedback: FeedbackStats = Field(default_factory=FeedbackStats)
 
 
 class Digest(BaseModel):

@@ -27,7 +27,11 @@ logger = logging.getLogger(__name__)
 
 
 class GitHubError(Exception):
-    """调用 GitHub API 失败。"""
+    """调用 GitHub API 失败。status 是 HTTP 状态码。"""
+
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 @dataclass
@@ -37,7 +41,7 @@ class IssueRef:
 
 
 class GitHubClient:
-    """GitHub REST API 的最小封装，只包含日报和指令交互需要的几个接口。"""
+    """GitHub REST API 的最小封装，只包含日报、指令交互和表情同步需要的几个接口。"""
 
     def __init__(
         self,
@@ -99,19 +103,15 @@ class GitHubClient:
         return IssueRef(number=data["number"], url=data["html_url"])
 
     def list_comments(self, issue_number: int) -> list[dict[str, Any]]:
-        comments: list[dict[str, Any]] = []
-        page = 1
-        while True:
-            response = self._request(
-                "GET",
-                f"/repos/{self.repository}/issues/{issue_number}/comments",
-                params={"per_page": 100, "page": page},
-            )
-            batch = self._check(response, "查询评论").json()
-            comments.extend(batch)
-            if len(batch) < 100:
-                return comments
-            page += 1
+        return self._paginate(
+            f"/repos/{self.repository}/issues/{issue_number}/comments", "查询评论"
+        )
+
+    def list_reactions(self, comment_id: int) -> list[dict[str, Any]]:
+        """Issue 评论上的全部表情，每项包含 content（+1、-1、eyes 等）和 user.login。"""
+        return self._paginate(
+            f"/repos/{self.repository}/issues/comments/{comment_id}/reactions", "查询表情"
+        )
 
     def create_comment(self, issue_number: int, body: str) -> int:
         response = self._request(
@@ -135,6 +135,18 @@ class GitHubClient:
             json={"state": "closed", "state_reason": "completed"},
         )
         self._check(response, "关闭 Issue")
+
+    def _paginate(self, url: str, action: str) -> list[dict[str, Any]]:
+        """按页读取列表接口，直到某一页不满 100 条。"""
+        items: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            response = self._request("GET", url, params={"per_page": 100, "page": page})
+            batch = self._check(response, action).json()
+            items.extend(batch)
+            if len(batch) < 100:
+                return items
+            page += 1
 
     def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         """发送请求；遇到限流或（幂等请求的）服务端错误时等待后重试。"""
@@ -173,7 +185,9 @@ class GitHubClient:
             message = response.json().get("message", "")
         except ValueError:
             message = response.text[:200]
-        raise GitHubError(f"{action}失败（HTTP {response.status_code}）：{message}")
+        raise GitHubError(
+            f"{action}失败（HTTP {response.status_code}）：{message}", response.status_code
+        )
 
 
 class IssuePublisher:
