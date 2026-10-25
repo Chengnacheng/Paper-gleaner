@@ -10,18 +10,12 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 
+from gleaner.llm.prompt import escape_tags, estimate_tokens, truncate_to_tokens
 from gleaner.models import Paper
-from gleaner.reader.fulltext import (
-    DEFAULT_PRIORITIES,
-    FullText,
-    SectionKind,
-    estimate_tokens,
-    truncate_to_tokens,
-)
+from gleaner.reader.fulltext import DEFAULT_PRIORITIES, FullText, SectionKind
 
 # 包裹外部内容用到的标签
 _WRAPPER_TAGS = ("paper", "text", "links", "interests", "related", "work")
-_WRAPPER_TAG_RE = re.compile(rf"<(\s*/?\s*(?:{'|'.join(_WRAPPER_TAGS)})\b)", re.IGNORECASE)
 # 给标签、格式说明等留出的余量，保证整条请求不超过 max_input_tokens
 PROMPT_MARGIN_TOKENS = 300
 MAX_INTEREST_TOKENS = 2_000
@@ -41,7 +35,7 @@ _THINK_RE = re.compile(r"\A\s*<think>.*?</think>\s*", re.DOTALL)
 
 def untrusted(text: str) -> str:
     """把外部内容中与包裹标签同名的标签换成形近字符，避免提前闭合 <paper> 等标签。"""
-    return _WRAPPER_TAG_RE.sub(r"‹\1", text)
+    return escape_tags(text, _WRAPPER_TAGS)
 
 
 def interests_block(interests: str | None) -> str:

@@ -30,7 +30,7 @@ def load_seen(store: DataStore, today: date, months: int = SEEN_LOOKBACK_MONTHS)
     不包含今天的记录，这样同一天强制重跑时，今天的论文不会被当成重复。
     """
     seen = set()
-    for month in _recent_months(today, months):
+    for month in recent_months(today, months):
         for record in store.read_jsonl(f"{SEEN_DIR}/{month}.jsonl"):
             if record.get("date") != today.isoformat() and "id" in record:
                 seen.add(record["id"])
@@ -76,7 +76,8 @@ def compile_keywords(keywords: list[str]) -> re.Pattern[str] | None:
     return re.compile(rf"(?<!\w)(?:{'|'.join(words)})(?!\w)", re.IGNORECASE)
 
 
-def _recent_months(today: date, months: int) -> list[str]:
+def recent_months(today: date, months: int) -> list[str]:
+    """今天所在的月份及之前的 months - 1 个月，格式为 YYYY-MM，从近到远。"""
     year, month = today.year, today.month
     result = []
     for _ in range(months):

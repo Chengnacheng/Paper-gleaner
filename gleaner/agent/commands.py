@@ -5,7 +5,7 @@
 序号按这个 Issue 对应的那一天解析，所以在旧日报下评论同样有效；
 日报推荐的论文编号 1…N，/more 列出的候选接着编号 N+1…。
 
-这里只负责「做什么」：返回回复的 Markdown，并把报告缓存、隐式反馈写进 DataStore；
+这里只负责「做什么」：返回回复的 Markdown，并把报告缓存、反馈写进 DataStore；
 发评论、加表情、提交数据分支由 pipelines/interact.py 完成。
 """
 
@@ -17,16 +17,15 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from functools import cached_property
-from typing import Literal
-from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 
 from gleaner.config import Config
 from gleaner.llm import LLMClient, LLMError
-from gleaner.models import Digest, Feedback, Paper
+from gleaner.models import Digest, Paper
 from gleaner.pipelines.daily import DIGEST_DIR, digest_path
-from gleaner.profile import ProfileError, load_interests
+from gleaner.profile import ProfileError, command_feedback, load_interests, record_feedback
+from gleaner.profile.memory import CommandSignal
 from gleaner.reader import (
     MAX_COMPARE_PAPERS,
     FullText,
@@ -54,8 +53,6 @@ from gleaner.store import DataStore
 COMMANDS = ("deep", "compare", "more", "help")
 DEFAULT_MORE = 5
 MAX_MORE = 20
-FEEDBACK_DIR = "feedback"
-IMPLICIT_FEEDBACK_WEIGHT = 0.5  # /deep、/compare 作为隐式正反馈（docs 3.4）
 
 _FORCE_FLAGS = {"--force", "-f"}
 # 参数之间可以用空格、逗号或顿号分隔："/compare 3 5"、"/compare 3,5"、"/compare 3、5"
@@ -391,22 +388,10 @@ def _fetch(paper: Paper, ctx: Context) -> tuple[Paper, FullText]:
 
 
 def _record_feedback(
-    ctx: Context, papers: Iterable[Paper], signal: Literal["deep", "compare"]
+    ctx: Context, papers: Iterable[Paper], signal: CommandSignal, note: str | None = None
 ) -> None:
-    """把 /deep、/compare 记为隐式正反馈（只写不读，留给 Phase 3）。"""
+    """写入指令产生的反馈（/deep、/compare 为隐式正反馈），本地调试时不写。"""
     if not ctx.persist:
         return
-    month = ctx.now.astimezone(ZoneInfo(ctx.config.timezone)).strftime("%Y-%m")
-    records = [
-        Feedback(
-            paper_id=paper.id,
-            title=paper.title,
-            abstract=paper.abstract,
-            signal=signal,
-            weight=IMPLICIT_FEEDBACK_WEIGHT,
-            source="command",
-            created_at=ctx.now,
-        ).model_dump(mode="json")
-        for paper in papers
-    ]
-    ctx.store.append_jsonl(f"{FEEDBACK_DIR}/{month}.jsonl", records)
+    records = [command_feedback(paper, signal, now=ctx.now, note=note) for paper in papers]
+    record_feedback(ctx.store, records, timezone=ctx.config.timezone)

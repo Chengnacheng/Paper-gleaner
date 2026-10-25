@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class Paper(BaseModel):
@@ -79,9 +79,10 @@ class DeepReport(BaseModel):
 
 
 class Feedback(BaseModel):
-    """一条反馈，按月追加到 gleaner-data 分支的 feedback/<YYYY-MM>.jsonl。
+    """一条反馈，按月追加到 gleaner-data 分支的 feedback/<YYYY-MM>.jsonl（只追加，不修改）。
 
-    Phase 2 只写入 /deep、/compare 产生的隐式正反馈，Phase 3 再读取并参与粗筛。
+    表情记录的 weight 是同步时的状态：+1（👍）、-1（👎）、0（撤销，signal 为被撤销的那个）。
+    聚合规则见 profile/memory.py。
     """
 
     paper_id: str
@@ -92,3 +93,9 @@ class Feedback(BaseModel):
     note: str | None = None  # /like 或 /dislike 附带的原因
     source: Literal["reaction", "command"]
     created_at: datetime
+
+    @field_validator("created_at")
+    @classmethod
+    def _assume_utc(cls, value: datetime) -> datetime:
+        # 手改的记录可能不带时区；不统一的话与其它记录比较先后时会出错
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
