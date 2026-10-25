@@ -2,6 +2,7 @@ from datetime import UTC, date, datetime
 
 from gleaner.models import Digest, RunStats, ScoredPaper
 from gleaner.render import issue_body, issue_title, paper_section, sanitize, stats_line
+from gleaner.render.markdown import split_comment
 
 
 def scored(n: int, **fields) -> ScoredPaper:
@@ -118,3 +119,43 @@ def test_stats_line() -> None:
     assert "token 32.0k（输入 31.2k / 输出 850）" in line
     assert "耗时 2 分 13 秒" in line
     assert "精排失败 1 批" in line
+
+
+def test_split_comment_keeps_short_bodies() -> None:
+    assert split_comment("短回复") == ["短回复"]
+
+
+def test_split_comment_breaks_at_blank_lines() -> None:
+    paragraphs = [f"第 {i} 段：" + "字" * 400 for i in range(10)]
+
+    parts = split_comment("\n\n".join(paragraphs), limit=1500)
+
+    assert len(parts) > 1
+    assert all(len(part) <= 1500 for part in parts)
+    assert parts[0].endswith("\n\n<sub>（未完，见下一条评论）</sub>")
+    assert parts[1].startswith(f"<sub>（续 2/{len(parts)}）</sub>\n\n第 ")
+    joined = "".join(parts)
+    assert all(paragraph in joined for paragraph in paragraphs)  # 段落没有被拆开
+
+
+def test_split_comment_reopens_code_blocks_and_details() -> None:
+    lines = [f"line {i} " + "x" * 50 for i in range(60)]
+    body = (
+        "<details><summary>原文</summary>\n\n```text\n" + "\n".join(lines) + "\n```\n\n</details>"
+    )
+
+    parts = split_comment(body, limit=1500)
+
+    assert len(parts) > 2
+    for part in parts:
+        assert len(part) <= 1500
+        assert part.count("```") % 2 == 0  # 每条评论里的代码块都是闭合的
+        assert part.count("<details") == part.count("</details>")
+    assert "```text" in parts[1]
+    assert all(line in "".join(parts) for line in lines)
+
+
+def test_split_comment_cuts_huge_lines() -> None:
+    parts = split_comment("x" * 5000, limit=1500)
+    assert all(len(part) <= 1500 for part in parts)
+    assert "".join(parts).count("x") == 5000

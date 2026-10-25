@@ -162,3 +162,12 @@ def test_chat_json_merges_system_prompt() -> None:
     assert sent[0]["content"].startswith("你是科研助理。")
     assert "JSON Schema" in sent[0]["content"]
     assert completions.requests[0]["temperature"] == 0.2
+
+
+def test_chat_passes_request_timeout() -> None:
+    client, completions = make_client(["a", "b"])
+    client.chat([{"role": "user", "content": "hi"}])
+    client.chat([{"role": "user", "content": "hi"}], tier="deep", timeout=180)
+
+    assert "timeout" not in completions.requests[0]  # 默认沿用 llm.timeout_seconds
+    assert completions.requests[1]["timeout"] == 180

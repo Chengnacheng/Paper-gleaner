@@ -292,3 +292,26 @@ def test_close_stale_failure_is_not_fatal() -> None:
 def test_close_stale_disabled() -> None:
     # 没有 mock 任何请求：如果发出请求会因为网络不可用而失败
     assert make_publisher(close_after_days=None).close_stale() == []
+
+
+@respx.mock
+def test_add_reaction() -> None:
+    route = respx.post(f"{API}/issues/comments/9001/reactions").mock(
+        side_effect=[httpx.Response(201, json={}), httpx.Response(200, json={})]
+    )
+    github = GitHubClient("t", "o/r")
+
+    github.add_reaction(9001, "eyes")
+    github.add_reaction(9001, "eyes")  # 已经加过时返回 200
+
+    assert route.call_count == 2
+    assert json.loads(route.calls[0].request.content) == {"content": "eyes"}
+
+
+@respx.mock
+def test_add_reaction_failure() -> None:
+    respx.post(f"{API}/issues/comments/9001/reactions").mock(
+        return_value=httpx.Response(403, json={"message": "Resource not accessible"})
+    )
+    with pytest.raises(GitHubError, match="添加表情失败"):
+        GitHubClient("t", "o/r").add_reaction(9001, "rocket")

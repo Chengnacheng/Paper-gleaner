@@ -51,8 +51,11 @@ class DailyResult:
     sampled: bool = False  # 没有新公告，改用了最近提交的论文
 
 
+DIGEST_DIR = "history/digests"
+
+
 def digest_path(day: date) -> str:
-    return f"history/digests/{day.isoformat()}.json"
+    return f"{DIGEST_DIR}/{day.isoformat()}.json"
 
 
 def run_daily(

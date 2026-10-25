@@ -15,6 +15,7 @@ import httpx
 import typer
 
 from gleaner import __version__
+from gleaner.agent import Command, CommandError, Context, Services, execute, latest_digest_day
 from gleaner.config import (
     EXAMPLE_CONFIG_PATH,
     Config,
@@ -26,10 +27,20 @@ from gleaner.llm import LLMClient, LLMError
 from gleaner.models import ScoredPaper
 from gleaner.notify import GitHubClient, GitHubError, IssuePublisher
 from gleaner.pipelines.daily import DailyResult, run_daily
+from gleaner.pipelines.interact import (
+    CommentEvent,
+    EventError,
+    InteractResult,
+    handle_comment,
+    load_event,
+    report_failure,
+)
 from gleaner.profile import ProfileError
 from gleaner.ranking import EmbeddingError, build_embedder
+from gleaner.reader import FulltextFetcher
 from gleaner.render import stats_line
-from gleaner.sources import SourceError
+from gleaner.render.replies import code, short_error
+from gleaner.sources import ArxivSource, SemanticScholar, SourceError
 from gleaner.store import DataBranch, DataBranchError
 
 app = typer.Typer(
@@ -46,6 +57,17 @@ ConfigOption = Annotated[
     Path | None,
     typer.Option(
         "--config", "-c", help="配置文件路径，默认依次查找 config.yaml、config.example.yaml"
+    ),
+]
+DataDirOption = Annotated[
+    Path, typer.Option("--data-dir", help="gleaner-data 分支的本地 worktree 目录")
+]
+DayOption = Annotated[
+    datetime | None,
+    typer.Option(
+        "--day",
+        formats=["%Y-%m-%d"],
+        help="按哪一天的日报解析序号，默认最近一份",
     ),
 ]
 
@@ -145,9 +167,7 @@ def daily(
         bool, typer.Option("--dry-run", help="完整运行，但不发布 Issue、不提交数据分支")
     ] = False,
     force: Annotated[bool, typer.Option("--force", help="当天日报已存在时仍重新生成")] = False,
-    data_dir: Annotated[
-        Path, typer.Option("--data-dir", help="gleaner-data 分支的本地 worktree 目录")
-    ] = DEFAULT_DATA_DIR,
+    data_dir: DataDirOption = DEFAULT_DATA_DIR,
 ) -> None:
     """运行每日推送流水线：抓取、筛选、精排，并发布到 GitHub Issue。"""
     _, config = _load(config_path)
@@ -183,6 +203,131 @@ def daily(
             f.write(f"## Paper Gleaner · {today.isoformat()}\n\n{report}\n")
 
 
+@app.command("handle-comment")
+def handle_comment_command(
+    config_path: ConfigOption = None,
+    event_path: Annotated[
+        Path | None,
+        typer.Option("--event", help="issue_comment 事件的 JSON 文件，默认读取 GITHUB_EVENT_PATH"),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="只把回复打印到终端：不发评论、不加表情、不写数据分支"),
+    ] = False,
+    data_dir: DataDirOption = DEFAULT_DATA_DIR,
+) -> None:
+    """处理 Issue 评论中的指令（由 interact.yml 调用）。"""
+    if event_path is None and (env_path := os.environ.get("GITHUB_EVENT_PATH", "").strip()):
+        event_path = Path(env_path)
+    if event_path is None:
+        typer.echo(
+            "✗ 没有事件文件：请用 --event 指定，或在 GitHub Actions 中运行（GITHUB_EVENT_PATH）"
+        )
+        raise typer.Exit(1)
+    try:
+        event = load_event(event_path)
+        replier = _EchoReplier() if dry_run else _github_client(event.repository)
+    except (EventError, ConfigError) as e:
+        typer.echo(f"✗ {e}", err=True)
+        raise typer.Exit(1) from e
+
+    try:
+        config = load_config(resolve_config_path(config_path))
+    except ConfigError as e:
+        result = report_failure(event, replier, f"配置有误，请检查 config.yaml：{short_error(e)}")
+    else:
+        result = handle_comment(
+            event,
+            config=config,
+            replier=replier,
+            branch=DataBranch(Path.cwd(), data_dir),
+            services=_services(config),
+            persist=not dry_run,
+            pause_seconds=0 if dry_run else 1.0,
+        )
+
+    summary = _interact_summary(event, result)
+    typer.echo(summary)
+    if summary_file := os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(summary_file, "a", encoding="utf-8") as f:
+            f.write(f"## Paper Gleaner · Issue {event.issue_number}\n\n{summary}\n")
+    if result.status == "failed":
+        raise typer.Exit(1)
+
+
+@app.command("deep")
+def deep_command(
+    ref: Annotated[str, typer.Argument(help="日报序号、arXiv ID 或 arXiv 链接")],
+    force: Annotated[bool, typer.Option("--force", help="忽略缓存，重新生成报告")] = False,
+    day: DayOption = None,
+    config_path: ConfigOption = None,
+    data_dir: DataDirOption = DEFAULT_DATA_DIR,
+) -> None:
+    """在本地深读一篇论文，把报告打印到终端（不发评论、不写数据分支）。"""
+    _run_local(Command("deep", (ref,), force=force), config_path, data_dir, day)
+
+
+@app.command("compare")
+def compare_command(
+    refs: Annotated[list[str], typer.Argument(help="两篇以上横向对比；一篇时与相关工作对比")],
+    day: DayOption = None,
+    config_path: ConfigOption = None,
+    data_dir: DataDirOption = DEFAULT_DATA_DIR,
+) -> None:
+    """在本地对比论文，把结果打印到终端（不发评论、不写数据分支）。"""
+    _run_local(Command("compare", tuple(refs)), config_path, data_dir, day)
+
+
+def _run_local(
+    command: Command, config_path: Path | None, data_dir: Path, day: datetime | None
+) -> None:
+    _, config = _load(config_path)
+    try:
+        store = DataBranch(Path.cwd(), data_dir).checkout()
+        ctx = Context(
+            config,
+            _services(config),
+            store,
+            day=day.date() if day else latest_digest_day(store),
+            persist=False,
+        )
+        typer.echo(execute(command, ctx))
+    except (CommandError, DataBranchError) as e:
+        typer.echo(f"✗ {e}", err=True)
+        raise typer.Exit(1) from e
+
+
+def _services(config: Config) -> Services:
+    api_key = os.environ.get("S2_API_KEY", "").strip() or None
+    return Services(
+        arxiv=ArxivSource(config.sources.arxiv),
+        fetcher=FulltextFetcher(),
+        s2=SemanticScholar(api_key),
+        llm_factory=lambda: LLMClient(config.llm),
+    )
+
+
+class _EchoReplier:
+    """试运行时代替 GitHub：把回复打印到终端。"""
+
+    def __init__(self) -> None:
+        self._next_id = 0
+
+    def create_comment(self, issue_number: int, body: str) -> int:
+        self._next_id += 1
+        typer.echo(f"----- 回复 Issue {issue_number}（第 {self._next_id} 条）-----\n{body}\n")
+        return self._next_id
+
+    def add_reaction(self, comment_id: int, content: str) -> None:
+        typer.echo(f"· 给评论 {comment_id} 加 {content}")
+
+
+def _interact_summary(event: CommentEvent, result: InteractResult) -> str:
+    command = result.command.text if result.command else event.comment_body.split("\n")[0]
+    labels = {"ignored": "跳过", "done": "✓ 完成", "rejected": "! 未执行", "failed": "✗ 失败"}
+    return f"{labels[result.status]} {code(command)}：{result.message}"
+
+
 def _load(config_path: Path | None) -> tuple[Path, Config]:
     try:
         path = resolve_config_path(config_path)
@@ -197,16 +342,19 @@ def _load(config_path: Path | None) -> tuple[Path, Config]:
 def _build_publisher(config: Config) -> IssuePublisher | None:
     if not config.notify.github_issue.enabled:
         return None
+    return IssuePublisher(_github_client(), config.notify.github_issue)
+
+
+def _github_client(repository: str = "") -> GitHubClient:
     token = os.environ.get("GITHUB_TOKEN", "").strip()
-    repository = os.environ.get("GITHUB_REPOSITORY", "").strip()
+    repository = os.environ.get("GITHUB_REPOSITORY", "").strip() or repository
     if not token or not repository:
         raise ConfigError(
-            "发布 Issue 需要 GITHUB_TOKEN 和 GITHUB_REPOSITORY 环境变量"
+            "访问 GitHub 需要 GITHUB_TOKEN 和 GITHUB_REPOSITORY 环境变量"
             "（GitHub Actions 中自动提供）；本地试运行请加 --dry-run"
         )
     api_url = os.environ.get("GITHUB_API_URL", "").strip() or "https://api.github.com"
-    github = GitHubClient(token, repository, api_url=api_url)
-    return IssuePublisher(github, config.notify.github_issue)
+    return GitHubClient(token, repository, api_url=api_url)
 
 
 _REPAIR_HINT = "不加 --force 重新运行（或等 11:30 的兜底运行）会自动补发"

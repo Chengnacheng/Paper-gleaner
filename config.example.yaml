@@ -32,7 +32,8 @@ ranking:
 
 deep_read:
   auto_top_m: 1                    # 日报中自动深读的篇数，0 表示关闭
-  max_input_tokens: 30000
+  max_input_tokens: 30000          # /deep、/compare 单条指令的输入上限（按字符数估算）
+  timeout_seconds: 180             # 深读、对比单次 LLM 调用的超时（秒）
 
 llm:
   base_url: https://api.deepseek.com   # 也可以用环境变量 LLM_BASE_URL 覆盖
