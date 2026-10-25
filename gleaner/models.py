@@ -81,6 +81,17 @@ class RunStats(BaseModel):
     feedback: FeedbackStats = Field(default_factory=FeedbackStats)
 
 
+class ChannelResult(BaseModel):
+    """一个推送渠道（邮件、飞书、企业微信）的发送结果，记在 digest 里。
+
+    兜底运行据此只补发上次失败的渠道，不重复发送。error 已经脱敏（gleaner-data 是公开的）。
+    """
+
+    status: Literal["sent", "failed"]
+    error: str | None = None
+    at: datetime
+
+
 class Digest(BaseModel):
     """一天的推送结果，保存在 gleaner-data 分支的 history/digests/<日期>.json。"""
 
@@ -93,6 +104,7 @@ class Digest(BaseModel):
     issue_number: int | None = None
     issue_url: str | None = None
     comment_ids: dict[str, int] = Field(default_factory=dict)  # 论文 ID → 评论 ID
+    notifications: dict[str, ChannelResult] = Field(default_factory=dict)  # 渠道名 → 发送结果
 
 
 class DeepReport(BaseModel):

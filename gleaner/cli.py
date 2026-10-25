@@ -28,6 +28,7 @@ from gleaner.config import (
 from gleaner.llm import LLMClient, LLMError
 from gleaner.models import ScoredPaper
 from gleaner.notify import GitHubClient, GitHubError, IssuePublisher
+from gleaner.notify.base import CHANNEL_LABELS, CHANNELS, DEFAULT_SMTP_PORT, missing_settings
 from gleaner.pipelines.daily import DailyResult, run_daily
 from gleaner.pipelines.interact import (
     CommentEvent,
@@ -142,6 +143,9 @@ def check(
     models = config.llm.models
     typer.echo(f"· LLM：{config.llm.base_url}（fast={models.fast}，deep={models.deep}）")
     typer.echo(f"· arXiv 分类：{', '.join(config.sources.arxiv.categories)}")
+    channel_lines, channel_problems = _channel_status(config)
+    typer.echo("\n".join(channel_lines))
+    problems += channel_problems
 
     if ping_llm and config.llm.api_key is not None:
         client = LLMClient(config.llm)
@@ -157,6 +161,50 @@ def check(
 
     if problems:
         raise typer.Exit(1)
+
+
+def _channel_status(config: Config) -> tuple[list[str], int]:
+    """各推送渠道的配置状态（不发送消息，验证请用 gleaner notify-test）。"""
+    notify = config.notify
+    lines = [
+        "· GitHub Issue：已启用"
+        if notify.github_issue.enabled
+        else "· GitHub Issue：未启用（其它渠道照样推送，但不带 Issue 链接，也不能评论交互）"
+    ]
+    problems = 0
+    for channel in CHANNELS:
+        label = CHANNEL_LABELS[channel]
+        missing = missing_settings(notify, channel)
+        if not getattr(notify, channel).enabled:
+            configured = "（相关 Secret 已设置，" if not missing else ""
+            if configured:
+                configured += f"把 notify.{channel}.enabled 改为 true 即可启用）"
+            lines.append(f"· {label}：未启用{configured}")
+        elif missing:
+            lines.append(f"✗ {label}：已启用，但缺少环境变量 {'、'.join(missing)}（GitHub Secret）")
+            problems += 1
+        else:
+            lines.append(f"✓ {label}：{_channel_detail(config, channel)}")
+    if any(getattr(notify, channel).enabled for channel in CHANNELS):
+        lines.append("  运行 gleaner notify-test 给已启用的渠道各发一条测试消息")
+    return lines, problems
+
+
+def _channel_detail(config: Config, channel: str) -> str:
+    notify = config.notify
+    if channel == "email":
+        email = notify.email
+        port = email.smtp_port or DEFAULT_SMTP_PORT
+        mode = "SSL" if port == 465 else "STARTTLS"
+        return f"SMTP {email.smtp_host}:{port}（{mode}），收件人 {len(email.to)} 个"
+    if channel == "feishu":
+        if notify.feishu.secret is None:
+            return (
+                "已设置 Webhook；未设置 FEISHU_SECRET，"
+                "建议在机器人的安全设置中开启「签名校验」并把密钥配置为 Secret"
+            )
+        return "已设置 Webhook，已开启签名校验"
+    return f"已设置 Webhook，每次最多发 {notify.wecom.max_papers} 篇"
 
 
 # 日报运行中可预期的失败：打印原因后以退出码 1 结束，不打印调用栈

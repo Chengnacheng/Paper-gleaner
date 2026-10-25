@@ -49,6 +49,19 @@ ENV_VARS = [
     "GITHUB_STEP_SUMMARY",
     "GITHUB_EVENT_PATH",
     "S2_API_KEY",
+    "EMBEDDING_API_KEY",
+    "EMBEDDING_BASE_URL",
+    "SMTP_HOST",
+    "SMTP_PORT",
+    "SMTP_USER",
+    "SMTP_PASSWORD",
+    "EMAIL_TO",
+    "FEISHU_WEBHOOK",
+    "FEISHU_SECRET",
+    "WECOM_WEBHOOK",
+    "ZOTERO_ID",
+    "ZOTERO_KEY",
+    "GLEANER_ZOTERO_CACHE",
 ]
 
 
@@ -498,6 +511,43 @@ def test_check_passes_when_complete(workdir: Path, monkeypatch: pytest.MonkeyPat
     assert "✓ 兴趣描述" in result.output
     assert "✓ LLM_API_KEY" in result.output
     assert "cs.CL, cs.LG" in result.output
+
+
+def test_check_reports_channels(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (workdir / "profile").mkdir()
+    (workdir / "profile" / "interests.md").write_text("长上下文推理", encoding="utf-8")
+    (workdir / "config.yaml").write_text(
+        "notify:\n  github_issue: {enabled: false}\n"
+        "  email: {enabled: true}\n  feishu: {enabled: true}\n"
+    )
+    monkeypatch.setenv("LLM_API_KEY", "sk-test")
+    webhook = "https://open.feishu.cn/open-apis/bot/v2/hook/token-abc"
+    monkeypatch.setenv("FEISHU_WEBHOOK", webhook)
+    monkeypatch.setenv("WECOM_WEBHOOK", "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=k1")
+    monkeypatch.setenv("SMTP_HOST", "smtp.qq.com")
+
+    result = runner.invoke(app, ["check"])
+
+    assert result.exit_code == 1, result.output
+    assert "· GitHub Issue：未启用（其它渠道照样推送" in result.output
+    assert "✗ 邮件：已启用，但缺少环境变量 SMTP_USER、SMTP_PASSWORD、EMAIL_TO" in result.output
+    assert "✓ 飞书：已设置 Webhook；未设置 FEISHU_SECRET" in result.output
+    assert "· 企业微信：未启用（相关 Secret 已设置，把 notify.wecom.enabled 改为 true" in (
+        result.output
+    )
+    assert "gleaner notify-test" in result.output
+    assert "token-abc" not in result.output and "k1" not in result.output
+
+    monkeypatch.setenv("SMTP_USER", "me@qq.com")
+    monkeypatch.setenv("SMTP_PASSWORD", "auth-code")
+    monkeypatch.setenv("EMAIL_TO", "a@example.com,b@example.com")
+    monkeypatch.setenv("FEISHU_SECRET", "sign")
+    result = runner.invoke(app, ["check"])
+
+    assert result.exit_code == 0, result.output
+    assert "✓ 邮件：SMTP smtp.qq.com:465（SSL），收件人 2 个" in result.output
+    assert "✓ 飞书：已设置 Webhook，已开启签名校验" in result.output
+    assert "me@qq.com" not in result.output and "a@example.com" not in result.output
 
 
 def test_falls_back_to_example_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
