@@ -220,6 +220,11 @@ def test_daily_dry_run_syncs_reactions_without_committing(
     assert first.called
     assert "· 同步了 1 条表情反馈" in result.output
     assert "[1] 9/10  2610.00001" in result.output
+    # 终端输出里有粗筛分数的分项和反馈统计，用来观察反馈是否生效
+    assert "    📊 粗筛 " in result.output
+    assert "+ 正反馈 " in result.output
+    assert "反馈：👍 1 · 👎 0" in result.output
+    assert "本次同步表情 1 条" in result.output
     assert git("rev-parse", "gleaner-data", cwd=git_remote) == before  # dry-run 不写数据
 
 

@@ -451,4 +451,18 @@ def _format_paper(index: int, paper: ScoredPaper) -> str:
         lines.append(f"    🎯 {paper.reason}")
     if paper.tldr:
         lines.append(f"    📝 {paper.tldr}")
+    if breakdown := score_breakdown(paper):
+        lines.append(f"    📊 {breakdown}")
     return "\n".join(lines)
+
+
+def score_breakdown(paper: ScoredPaper) -> str:
+    """粗筛分数的分项，如「粗筛 0.912 = 兴趣 0.850 + 正反馈 0.120 − 负向 0.058」。"""
+    if paper.coarse_score is None or paper.interest_score is None:
+        return ""
+    text = f"粗筛 {paper.coarse_score:.3f} = 兴趣 {paper.interest_score:.3f}"
+    if paper.positive_score is not None:
+        text += f" + 正反馈 {paper.positive_score:.3f}"
+    if paper.negative_score is not None:
+        text += f" − 负向 {paper.negative_score:.3f}"
+    return text

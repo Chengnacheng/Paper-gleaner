@@ -31,6 +31,11 @@ class ScoredPaper(Paper):
 
     coarse_score: float | None = None
     coarse_match: str | None = None  # 向量最接近的兴趣子方向
+    # 粗筛分数的分项（docs 3.1.1）：coarse_score = 兴趣 + 正反馈 - 负反馈，都已乘过权重。
+    # 没有正反馈锚点时 positive_score 为 None，没有负向锚点时 negative_score 为 None
+    interest_score: float | None = None
+    positive_score: float | None = None
+    negative_score: float | None = None
     forced: bool = False  # 命中 include_keywords，跳过了粗筛
     llm_score: int | None = None  # 0–10；None 表示精排失败或未精排
     matched_interests: list[str] = Field(default_factory=list)

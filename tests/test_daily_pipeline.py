@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -6,10 +7,18 @@ import pytest
 
 from gleaner.config import Config
 from gleaner.filters import record_seen
+from gleaner.llm import LLMError
 from gleaner.models import Digest, Paper, ScoredPaper
 from gleaner.notify import GitHubError, IssueRef
 from gleaner.pipelines.daily import digest_path, run_daily
-from gleaner.profile import ProfileError, load_feedback
+from gleaner.profile import (
+    ProfileError,
+    command_feedback,
+    load_feedback,
+    load_muted,
+    record_feedback,
+)
+from gleaner.profile.muted import MUTED_PATH
 from gleaner.sources.arxiv import parse_rss
 from gleaner.store import DataStore
 from tests.conftest import (
@@ -371,7 +380,7 @@ def test_skips_sync_without_reader(config: Config, papers: list[Paper], tmp_path
 
 
 def test_reads_phase2_digest() -> None:
-    # Phase 2 保存的 digest（没有反馈统计字段）仍能读取，新字段取默认值
+    # Phase 2 保存的 digest（没有粗筛分项和反馈统计字段）仍能读取，新字段取默认值
     text = (FIXTURES / "digest_phase2.json").read_text(encoding="utf-8")
     digest = Digest.model_validate_json(text)
 
@@ -379,4 +388,94 @@ def test_reads_phase2_digest() -> None:
     assert digest.comment_ids == {"2610.19540": 6388934280, "2610.04922": 6388934591}
     paper = digest.papers[0]
     assert paper.coarse_score == 0.8093
+    assert (paper.interest_score, paper.positive_score, paper.negative_score) == (None, None, None)
     assert digest.stats.feedback.empty
+
+
+# --- 反馈参与粗筛 ---------------------------------------------------------------
+
+
+def with_describer(scores=SCORES, *, fail: bool = False):
+    """在 pipeline_llm 之外再处理屏蔽主题的英文描述。"""
+    base = pipeline_llm(scores)
+
+    def handler(request: dict[str, Any]) -> str:
+        if "要屏蔽的一个主题" in request["messages"][0]["content"]:
+            if fail:
+                raise LLMError("额度用完")
+            return json.dumps({"query": "Medical imaging with deep networks."})
+        return base(request)
+
+    return handler
+
+
+def test_feedback_shapes_coarse_scores(config: Config, papers: list[Paper], tmp_path: Path) -> None:
+    store = DataStore(tmp_path)
+    liked = Paper(id="2609.00001", title="Fast attention", abstract="Attention kernels, attention.")
+    disliked = Paper(id="2609.00002", title="Retrieval benchmark", abstract="Retrieval.")
+    record_feedback(
+        store,
+        [
+            command_feedback(liked, "like", now=datetime(2026, 10, 20, tzinfo=UTC)),
+            command_feedback(disliked, "dislike", now=datetime(2026, 10, 21, tzinfo=UTC)),
+        ],
+        timezone=config.timezone,
+    )
+
+    result, _, _ = run(config, store, papers)
+
+    by_id = {p.id: p for p in [*result.digest.papers, *result.digest.others]}
+    attention, rag = by_id["2610.00003"], by_id["2610.00002"]
+    assert attention.positive_score > rag.positive_score
+    assert rag.negative_score > attention.negative_score
+    assert attention.coarse_score == pytest.approx(
+        attention.interest_score + attention.positive_score - attention.negative_score, abs=1e-3
+    )
+    feedback = result.digest.stats.feedback
+    assert (feedback.like, feedback.dislike, feedback.positive, feedback.negative) == (1, 1, 1, 1)
+    saved = store.read_model(digest_path(TODAY), Digest)
+    assert saved.papers[0].interest_score is not None
+
+
+def test_backfills_muted_topic_descriptions(
+    config: Config, papers: list[Paper], tmp_path: Path
+) -> None:
+    store = DataStore(tmp_path)
+    store.append_jsonl(MUTED_PATH, [{"action": "mute", "topic": "医学影像"}])  # 手写的，没有描述
+    llm, fake = fake_llm(with_describer())
+
+    result = run_daily(
+        config,
+        store=store,
+        llm=llm,
+        embedder=KeywordEmbedder(PIPELINE_VOCABULARY),
+        today=TODAY,
+        source=FakeSource(papers),
+        now=datetime(2026, 10, 26, 1, 30, tzinfo=UTC),
+    )
+
+    assert len(fake.requests) == 4  # 兴趣拆解 + 屏蔽主题描述 + 精排 + 概览
+    assert [m.query for m in load_muted(store)] == ["Medical imaging with deep networks."]
+    assert result.digest.stats.feedback.muted == 1
+    assert result.warnings == []
+
+
+def test_muted_description_failure_is_a_warning(
+    config: Config, papers: list[Paper], tmp_path: Path
+) -> None:
+    store = DataStore(tmp_path)
+    store.append_jsonl(MUTED_PATH, [{"action": "mute", "topic": "医学影像"}])
+    llm, _ = fake_llm(with_describer(fail=True))
+
+    result = run_daily(
+        config,
+        store=store,
+        llm=llm,
+        embedder=KeywordEmbedder(PIPELINE_VOCABULARY),
+        today=TODAY,
+        source=FakeSource(papers),
+    )
+
+    assert result.status == "preview"
+    [warning] = result.warnings
+    assert "屏蔽主题「医学影像」的英文描述没有生成" in warning

@@ -10,7 +10,7 @@ import html
 import re
 from datetime import date
 
-from gleaner.models import Digest, Paper, RunStats, ScoredPaper
+from gleaner.models import Digest, FeedbackStats, Paper, RunStats, ScoredPaper
 
 TITLE_PREFIX = "📚 Paper Gleaner"
 _ZERO_WIDTH_SPACE = "​"
@@ -97,7 +97,28 @@ def stats_line(stats: RunStats) -> str:
     )
     if stats.failed_batches:
         usage += f" · 精排失败 {stats.failed_batches} 批"
-    return f"{funnel}<br>\n{usage}"
+    lines = [funnel, usage]
+    if not stats.feedback.empty:
+        lines += feedback_lines(stats.feedback)
+    return "<br>\n".join(lines)
+
+
+def feedback_lines(feedback: FeedbackStats) -> list[str]:
+    """反馈概况：各类反馈的论文数、参与粗筛的锚点数，以及表情同步的情况。"""
+    signals = (
+        f"反馈：👍 {feedback.up} · 👎 {feedback.down} · /like {feedback.like} · "
+        f"/dislike {feedback.dislike} · /deep、/compare {feedback.implicit}"
+    )
+    anchors = (
+        f"粗筛锚点：正反馈 {feedback.positive} 篇 · 负反馈 {feedback.negative} 篇 · "
+        f"屏蔽主题 {feedback.muted} 个"
+    )
+    if feedback.synced:
+        anchors += f" · 本次同步表情 {feedback.synced} 条"
+    lines = [signals, anchors]
+    if feedback.sync_error:
+        lines.append(f"⚠️ 表情同步没有完成：{sanitize(_truncate(feedback.sync_error, 200))}")
+    return lines
 
 
 def sanitize(text: str) -> str:

@@ -17,7 +17,7 @@ from pydantic import ValidationError
 from gleaner.config import Config
 from gleaner.filters import apply_filters, load_seen, record_seen
 from gleaner.llm import LLMClient
-from gleaner.models import Digest, FeedbackStats, RunStats
+from gleaner.models import Digest, RunStats
 from gleaner.notify import IssueRef
 from gleaner.pipelines.feedback import (
     REACTION_SYNC_DAYS,
@@ -25,7 +25,7 @@ from gleaner.pipelines.feedback import (
     SyncResult,
     sync_reactions,
 )
-from gleaner.profile import get_anchors, load_interests
+from gleaner.profile import ensure_queries, get_anchors, load_interests, load_memory
 from gleaner.ranking import Embedder, coarse_rank, rerank, summarize
 from gleaner.sources import ArxivSource, Source
 from gleaner.store import DataStore
@@ -59,14 +59,7 @@ class DailyResult:
     existing: IssueRef | None = None
     sampled: bool = False  # 没有新公告，改用了最近提交的论文
     sync: SyncResult = field(default_factory=SyncResult)  # 第 0 步：表情同步
-
-    @property
-    def warnings(self) -> list[str]:
-        if self.sync.error is None:
-            return []
-        return [
-            f"表情同步没有完成（已写入 {self.sync.records} 条，其余下次再同步）：{self.sync.error}"
-        ]
+    warnings: list[str] = field(default_factory=list)  # 不影响日报的问题，如表情同步失败
 
 
 DIGEST_DIR = "history/digests"
@@ -124,11 +117,12 @@ def run_daily(
         sync = sync_reactions(
             store, digests, reactions, owner=owner, today=today, now=now, timezone=config.timezone
         )
+    warnings = _sync_warnings(sync)
 
     existing = None if publisher is None or force else publisher.find_existing(today)
     if existing is not None:
         result = _repair(store, publisher, existing, today)
-        result.sync = sync
+        result.sync, result.warnings = sync, warnings
         return result
 
     source = source or ArxivSource(config.sources.arxiv)
@@ -137,7 +131,7 @@ def run_daily(
     if sampled and sample_size:
         papers = source.fetch_recent(sample_size)
     if not papers:
-        return DailyResult("no_announcements", sync=sync)
+        return DailyResult("no_announcements", sync=sync, warnings=warnings)
 
     seen = set() if sampled else load_seen(store, today)
     filtered = apply_filters(papers, seen=seen, config=config.filters)
@@ -145,6 +139,9 @@ def run_daily(
         record_seen(store, [p for p in papers if p.id not in seen], today)
 
     anchors = get_anchors(store, interests, llm)
+    # 反馈锚点和屏蔽主题；手改过的屏蔽主题缺少英文描述时在这里补上
+    memory = load_memory(store, today)
+    warnings += ensure_queries(store, memory.muted, llm)
     ranking = config.ranking
     candidates = coarse_rank(
         filtered.papers,
@@ -153,6 +150,9 @@ def run_daily(
         top_k=ranking.coarse_top_k,
         weights=ranking.weights,
         forced_ids=filtered.forced_ids,
+        memory=memory,
+        half_life_days=ranking.feedback_half_life_days,
+        now=now,
     )
     reranked = rerank(
         candidates,
@@ -185,7 +185,9 @@ def run_daily(
             prompt_tokens=usage.prompt_tokens,
             completion_tokens=usage.completion_tokens,
             duration_seconds=round(time.monotonic() - started, 1),
-            feedback=FeedbackStats(synced=sync.records, sync_error=sync.error),
+            feedback=memory.stats(now, ranking.feedback_half_life_days).model_copy(
+                update={"synced": sync.records, "sync_error": sync.error}
+            ),
         ),
     )
 
@@ -210,7 +212,14 @@ def run_daily(
             }
         ],
     )
-    return DailyResult(status, digest, sampled=sampled, sync=sync)
+    return DailyResult(status, digest, sampled=sampled, sync=sync, warnings=warnings)
+
+
+def _sync_warnings(sync: SyncResult) -> list[str]:
+    if sync.error is None:
+        return []
+    written = f"已写入 {sync.records} 条，其余下次再同步"
+    return [f"表情同步没有完成（{written}）：{sync.error}"]
 
 
 def _repair(store: DataStore, publisher: Publisher, existing: IssueRef, today: date) -> DailyResult:

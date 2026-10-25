@@ -17,7 +17,7 @@ feedback/<YYYY-MM>.jsonl，只追加、不修改；并发追加靠 merge=union �
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Literal
@@ -26,7 +26,8 @@ from zoneinfo import ZoneInfo
 from pydantic import ValidationError
 
 from gleaner.filters import recent_months
-from gleaner.models import Feedback, Paper
+from gleaner.models import Feedback, FeedbackStats, Paper
+from gleaner.profile.muted import MutedTopic, load_muted
 from gleaner.store import DataStore
 
 FEEDBACK_DIR = "feedback"
@@ -36,6 +37,8 @@ REACTION_WEIGHT = 1.0  # 👍 / 👎
 COMMAND_WEIGHT = 2.0  # /like / /dislike
 IMPLICIT_WEIGHT = 0.5  # /deep、/compare
 MAX_NOTE_CHARS = 200  # /like、/dislike 附带的原因最多保留的字数
+# 每类反馈锚点最多取权重最高的这么多篇，控制每天嵌入的计算量
+MAX_FEEDBACK_ANCHORS = 200
 
 CommandSignal = Literal["like", "dislike", "deep", "compare"]
 _COMMAND_WEIGHTS: dict[str, float] = {
@@ -196,6 +199,49 @@ def aggregate_feedback(records: Iterable[Feedback]) -> list[PaperFeedback]:
         ]
         item.updated_at = max(active) if active else parts["any"]
     return list(papers.values())
+
+
+@dataclass
+class Memory:
+    """粗筛用到的记忆：每篇论文的有效反馈和当前屏蔽的主题。"""
+
+    feedback: list[PaperFeedback] = field(default_factory=list)
+    muted: list[MutedTopic] = field(default_factory=list)
+
+    def positive(self, now: datetime, half_life_days: float) -> list[tuple[PaperFeedback, float]]:
+        """正反馈锚点（A2）及其权重，按权重从高到低。"""
+        return self._anchors(lambda item: item.total > 0, now, half_life_days)
+
+    def negative(self, now: datetime, half_life_days: float) -> list[tuple[PaperFeedback, float]]:
+        """负反馈锚点（A3 中的论文）及其权重，按权重从高到低。"""
+        return self._anchors(lambda item: item.total < 0, now, half_life_days)
+
+    def stats(self, now: datetime, half_life_days: float) -> FeedbackStats:
+        return FeedbackStats(
+            up=sum(item.reaction > 0 for item in self.feedback),
+            down=sum(item.reaction < 0 for item in self.feedback),
+            like=sum(item.command > 0 for item in self.feedback),
+            dislike=sum(item.command < 0 for item in self.feedback),
+            implicit=sum(item.implicit > 0 for item in self.feedback),
+            positive=len(self.positive(now, half_life_days)),
+            negative=len(self.negative(now, half_life_days)),
+            muted=len(self.muted),
+        )
+
+    def _anchors(
+        self, keep: Callable[[PaperFeedback], bool], now: datetime, half_life_days: float
+    ) -> list[tuple[PaperFeedback, float]]:
+        weighted = [
+            (item, item.weight(now, half_life_days))
+            for item in self.feedback
+            if keep(item) and item.has_text
+        ]
+        weighted.sort(key=lambda pair: pair[1], reverse=True)
+        return weighted[:MAX_FEEDBACK_ANCHORS]
+
+
+def load_memory(store: DataStore, today: date) -> Memory:
+    return Memory(aggregate_feedback(load_feedback(store, today)), load_muted(store))
 
 
 def latest_reactions(records: Sequence[Feedback]) -> dict[str, float]:

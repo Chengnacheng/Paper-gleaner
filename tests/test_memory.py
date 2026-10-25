@@ -4,8 +4,16 @@ from pathlib import Path
 
 import pytest
 
-from gleaner.models import Feedback, Paper
-from gleaner.profile import aggregate_feedback, command_feedback, load_feedback, record_feedback
+from gleaner.models import Feedback, FeedbackStats, Paper
+from gleaner.profile import (
+    Memory,
+    MutedTopic,
+    aggregate_feedback,
+    command_feedback,
+    load_feedback,
+    load_memory,
+    record_feedback,
+)
 from gleaner.profile.memory import MAX_NOTE_CHARS, feedback_path, latest_reactions
 from gleaner.store import DataStore
 
@@ -203,3 +211,48 @@ def test_latest_reactions() -> None:
         fb("deep", 0.5, paper_id="2610.00003"),
     ]
     assert latest_reactions(records) == {"2610.00001": 0.0, "2610.00002": -1.0}
+
+
+# --- 粗筛用到的记忆 -------------------------------------------------------------
+
+
+def test_memory_anchors_and_stats(monkeypatch: pytest.MonkeyPatch) -> None:
+    feedback = aggregate_feedback(
+        [
+            fb("up", 1, hours=48),  # 2610.00001：👍 + /like = +3
+            fb("like", 2, hours=24),
+            fb("down", -1, paper_id="2610.00002"),
+            fb("deep", 0.5, paper_id="2610.00003"),
+            fb("up", 1, hours=5, paper_id="2610.00004"),  # 撤销了：不参与
+            fb("up", 0, paper_id="2610.00004"),
+            fb("dislike", -2, paper_id="2610.00005", title="2610.00005", abstract=""),
+        ]
+    )
+    memory = Memory(feedback, [MutedTopic("医学影像", None, NOW)])
+
+    positive = memory.positive(NOW, 90)
+    assert [(item.paper_id, round(weight, 3)) for item, weight in positive] == [
+        ("2610.00001", 0.992),  # 一天前，衰减了一点
+        ("2610.00003", 0.25),
+    ]
+    assert [item.paper_id for item, _ in memory.negative(NOW, 90)] == ["2610.00002"]
+    assert memory.stats(NOW, 90) == FeedbackStats(
+        up=1, down=1, like=1, dislike=1, implicit=1, positive=2, negative=1, muted=1
+    )
+
+    monkeypatch.setattr("gleaner.profile.memory.MAX_FEEDBACK_ANCHORS", 1)
+    assert [item.paper_id for item, _ in memory.positive(NOW, 90)] == ["2610.00001"]
+
+
+def test_load_memory(tmp_path: Path) -> None:
+    store = DataStore(tmp_path)
+    record_feedback(store, [fb("like", 2)], timezone=TZ)
+    store.append_jsonl(
+        "profile/muted.jsonl",
+        [{"action": "mute", "topic": "医学影像", "query": "Medical imaging."}],
+    )
+
+    memory = load_memory(store, date(2026, 10, 26))
+
+    assert [item.paper_id for item in memory.feedback] == ["2610.00001"]
+    assert [(m.topic, m.query) for m in memory.muted] == [("医学影像", "Medical imaging.")]
