@@ -54,12 +54,18 @@ def feedback_path(created_at: datetime, timezone: str) -> str:
     return f"{FEEDBACK_DIR}/{created_at.astimezone(ZoneInfo(timezone)):%Y-%m}.jsonl"
 
 
+def clean_note(note: str | None) -> str | None:
+    """整理 /like、/dislike 附带的原因：合并空白，截断到 MAX_NOTE_CHARS，空的返回 None。"""
+    if note is None:
+        return None
+    return " ".join(note.split())[:MAX_NOTE_CHARS] or None
+
+
 def command_feedback(
     paper: Paper, signal: CommandSignal, *, now: datetime, note: str | None = None
 ) -> Feedback:
     """指令产生的反馈：/like、/dislike 为 ±2，/deep、/compare 为 +0.5。"""
-    if note is not None:
-        note = " ".join(note.split())[:MAX_NOTE_CHARS] or None
+    note = clean_note(note)
     return Feedback(
         paper_id=paper.id,
         title=paper.title,

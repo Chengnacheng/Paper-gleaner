@@ -1,4 +1,5 @@
-from datetime import UTC, date, datetime
+import json
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -20,6 +21,8 @@ from gleaner.config import Config
 from gleaner.llm import LLMError
 from gleaner.models import Digest
 from gleaner.pipelines.daily import digest_path
+from gleaner.profile import load_feedback
+from gleaner.profile.muted import load_events, load_muted
 from gleaner.reader import load_report, report_path
 from gleaner.store import DataStore
 from tests.conftest import (
@@ -116,6 +119,21 @@ def test_unknown_command(text: str, name: str) -> None:
 
 def test_command_text() -> None:
     assert Command("deep", ("3",), force=True).text == "/deep 3 --force"
+
+
+@pytest.mark.parametrize(
+    ("text", "name", "rest"),
+    [
+        ("/like 3 有开源代码，方法简单", "like", "3 有开源代码，方法简单"),
+        ("/Dislike,7、纯 benchmark\n第二行不算", "dislike", "7、纯 benchmark"),
+        ("/mute  Medical Imaging ", "mute", "Medical Imaging"),
+        ("/unmute 医学影像", "unmute", "医学影像"),
+        ("/mute", "mute", ""),
+    ],
+)
+def test_parse_keeps_raw_text(text: str, name: str, rest: str) -> None:
+    command = parse_command(text)
+    assert (command.name, command.rest) == (name, rest)
 
 
 @pytest.mark.parametrize(
@@ -573,9 +591,9 @@ def test_more_escapes_candidates(config: Config, tmp_path: Path) -> None:
 
 def test_help(config: Config, store: DataStore) -> None:
     reply, _ = run("/help", config, store)
-    assert "`/deep <ref>`" in reply
-    for missing in ("/ask", "/like", "/dislike", "/mute"):
-        assert missing not in reply
+    for implemented in ("/deep <ref>", "/like <ref> [原因]", "/dislike <ref>", "/mute", "/unmute"):
+        assert f"`{implemented}" in reply
+    assert "/ask" not in reply  # 只列出已经实现的指令
 
 
 @respx.mock
@@ -597,3 +615,182 @@ def test_deep_without_llm_or_full_text(config: Config, store: DataStore) -> None
     assert "> ⚠️ 深读报告没有生成：未设置 LLM_API_KEY" in reply
     assert "> ⚠️ 也没能获取全文（HTML：HTTP 404；PDF：HTTP 404）。" in reply
     assert "- <https://github.com/example/longkv>" in reply
+
+
+# --- /like、/dislike ------------------------------------------------------------
+
+
+def feedback_rows(store: DataStore) -> list[tuple]:
+    return [
+        (r.paper_id, r.signal, r.weight, r.note, r.source)
+        for r in load_feedback(store, DIGEST_DAY + timedelta(days=1))
+    ]
+
+
+def test_like_with_reason(config: Config, store: DataStore) -> None:
+    reply, fake = run("/like 1 有开源代码，方法简单", config, store)
+
+    assert fake.requests == []  # 不调用 LLM
+    assert reply.startswith(
+        "👍 已记下：喜欢 [LongKV: Hierarchical KV Cache Compression]"
+        "(https://arxiv.org/abs/2610.00001)，原因：`有开源代码，方法简单`。"
+    )
+    assert "下一次日报的粗筛就会参考这条反馈" in reply
+    assert feedback_rows(store) == [("2610.00001", "like", 2.0, "有开源代码，方法简单", "command")]
+    saved = load_feedback(store, DIGEST_DAY + timedelta(days=1))[0]
+    assert (saved.title, saved.abstract, saved.created_at) == (
+        "LongKV: Hierarchical KV Cache Compression",
+        "We compress the KV cache.",
+        NOW,
+    )
+
+
+def test_dislike_without_reason(config: Config, store: DataStore) -> None:
+    reply, _ = run("/dislike 5", config, store)  # 序号 5 是 /more 里的第 3 篇候选
+
+    assert reply.startswith("👎 已记下：不喜欢 [Candidate 2](https://arxiv.org/abs/2610.00012)。")
+    assert "原因" not in reply
+    assert feedback_rows(store) == [("2610.00012", "dislike", -2.0, None, "command")]
+
+
+def test_dislike_replaces_like(config: Config, store: DataStore) -> None:
+    run("/like 2", config, store)
+    reply, _ = run("/dislike 2：纯 benchmark", config, store)
+
+    assert "原因：`纯 benchmark`（覆盖了之前的 /like）。" in reply
+    assert [row[1] for row in feedback_rows(store)] == ["like", "dislike"]
+
+
+def test_like_escapes_reason(config: Config, store: DataStore) -> None:
+    reply, _ = run("/like 1 @team 看 #12 <img src=x> `code`", config, store)
+    # 原因放进行内代码：@ 提及、#123 和 HTML 都不会生效
+    assert "原因：`@team 看 #12 <img src=x> 'code'`。" in reply
+
+
+@pytest.mark.parametrize("text", ["/like 9 很好", "/dislike 99"])
+def test_like_index_out_of_range(config: Config, store: DataStore, text: str) -> None:
+    with pytest.raises(CommandError, match="超出范围"):
+        run(text, config, store)
+    assert feedback_rows(store) == []
+
+
+@pytest.mark.parametrize("text", ["/like", "/dislike   "])
+def test_like_usage(config: Config, store: DataStore, text: str) -> None:
+    with pytest.raises(CommandError, match="用法：`/(like|dislike) <ref> \\[原因\\]`"):
+        run(text, config, store)
+
+
+@respx.mock
+def test_like_by_arxiv_id(config: Config, store: DataStore) -> None:
+    respx.get(ARXIV_API).mock(
+        return_value=httpx.Response(200, text=api_feed(("2609.99999", "Old Paper")))
+    )
+
+    reply, _ = run("/like https://arxiv.org/abs/2609.99999v2 经典", config, store, day=None)
+
+    assert "[Old Paper](https://arxiv.org/abs/2609.99999)" in reply
+    assert feedback_rows(store)[0][:2] == ("2609.99999", "like")
+
+
+def test_like_without_persist(config: Config, store: DataStore) -> None:
+    reply, _ = run("/like 1", config, store, persist=False)
+    assert reply.startswith("👍 已记下")
+    assert feedback_rows(store) == []
+
+
+# --- /mute、/unmute -------------------------------------------------------------
+
+MUTE_QUERY = "Deep learning methods for medical image segmentation and diagnosis."
+
+
+def describer(request) -> str:
+    return json.dumps({"query": MUTE_QUERY})
+
+
+def test_mute_generates_and_caches_english_query(config: Config, store: DataStore) -> None:
+    reply, fake = run("/mute 医学影像", config, store, handler=describer)
+
+    assert len(fake.requests) == 1
+    assert fake.requests[0]["model"] == "deepseek-chat"
+    assert "<topic>\n医学影像\n</topic>" in user_prompt(fake.requests[0])
+    assert reply.startswith("🔇 已屏蔽 `医学影像`，之后的日报会把这类论文排到后面。")
+    assert f"英文检索描述：{MUTE_QUERY}" in reply
+    assert "当前屏蔽的主题：`医学影像` · 评论 `/unmute 医学影像` 取消屏蔽" in reply
+    [event] = load_events(store)
+    assert (event.action, event.topic, event.query, event.model, event.created_at) == (
+        "mute",
+        "医学影像",
+        MUTE_QUERY,
+        "deepseek-chat",
+        NOW,
+    )
+
+
+def test_mute_twice(config: Config, store: DataStore) -> None:
+    run("/mute Medical Imaging", config, store, handler=describer)
+
+    reply, fake = run("/mute   medical   IMAGING ", config, store, handler=describer)
+
+    assert fake.requests == []
+    assert reply.startswith("🔇 `Medical Imaging` 已经屏蔽过了。")
+    assert len(load_events(store)) == 1
+
+
+def test_mute_when_llm_fails(config: Config, store: DataStore) -> None:
+    def boom(request):
+        raise LLMError("额度用完")
+
+    reply, _ = run("/mute 医学影像", config, store, handler=boom)
+
+    assert "> ⚠️ 英文检索描述暂时没有生成，下次运行日报时会自动补上。" in reply
+    [topic] = load_muted(store)
+    assert (topic.topic, topic.query) == ("医学影像", None)
+
+
+def test_mute_lists_topics(config: Config, store: DataStore) -> None:
+    empty, _ = run("/mute", config, store)
+    assert empty.startswith("🔇 当前没有屏蔽任何主题。")
+
+    run("/mute 医学影像", config, store, handler=describer)
+    run("/mute speech <b>", config, store, handler=describer)
+    reply, fake = run("/mute", config, store)
+
+    assert fake.requests == []
+    assert "🔇 当前屏蔽了 2 个主题：\n\n- `医学影像`\n- `speech <b>`" in reply
+
+
+def test_mute_rejects_long_topics(config: Config, store: DataStore) -> None:
+    with pytest.raises(CommandError, match="主题太长（51 个字）"):
+        run("/mute " + "长" * 51, config, store, handler=describer)
+
+
+def test_unmute(config: Config, store: DataStore) -> None:
+    run("/mute 医学影像", config, store, handler=describer)
+    later = NOW + timedelta(minutes=1)
+
+    reply, _ = run("/unmute 医学影像", config, store, now=later)
+
+    assert reply == "🔊 已取消屏蔽 `医学影像`。\n\n<sub>当前没有屏蔽任何主题</sub>"
+    assert [e.action for e in load_events(store)] == ["mute", "unmute"]
+    assert load_muted(store) == []
+
+    # 再次屏蔽：回放 mute → unmute → mute
+    run("/mute 医学影像", config, store, handler=describer, now=later + timedelta(minutes=1))
+    assert [m.topic for m in load_muted(store)] == ["医学影像"]
+
+
+def test_unmute_unknown_topic_lists_current(config: Config, store: DataStore) -> None:
+    run("/mute 医学影像", config, store, handler=describer)
+
+    with pytest.raises(CommandError) as info:
+        run("/unmute 语音", config, store)
+
+    assert str(info.value) == "`语音` 不在屏蔽列表中。当前屏蔽的主题：`医学影像`"
+    with pytest.raises(CommandError, match="用法：`/unmute <主题>`。当前屏蔽的主题：`医学影像`"):
+        run("/unmute", config, store)
+
+
+def test_mute_without_persist(config: Config, store: DataStore) -> None:
+    reply, _ = run("/mute 医学影像", config, store, handler=describer, persist=False)
+    assert reply.startswith("🔇 已屏蔽")
+    assert load_events(store) == []

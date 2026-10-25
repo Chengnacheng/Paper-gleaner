@@ -1,7 +1,7 @@
 """Issue 指令回复的 Markdown 渲染。
 
 论文标题、作者、模型输出和用户写的参数都是外部内容：标题和作者经过 sanitize，
-模型输出经过 sanitize_markdown，用户参数放进行内代码（code()）。
+模型输出经过 sanitize_markdown，用户参数（包括反馈原因、屏蔽主题）放进行内代码（code()）。
 回复中不写 gleaner:paper 标记，避免被当成日报的论文评论。
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
+from typing import Literal
 
 from gleaner.models import DeepReport, Digest, Paper, ScoredPaper
 from gleaner.reader.fulltext import FullText, FulltextSource
@@ -24,6 +25,7 @@ RELATION_NAMES = {"reference": "参考文献", "recommended": "推荐论文"}
 _ARXIV_ID_RE = re.compile(r"^\d{4}\.\d{4,5}$")
 _S2_URL_PREFIX = "https://www.semanticscholar.org/"
 _MAX_ERROR_CHARS = 200
+_MAX_NOTE_CHARS = 200  # 与 profile.memory.MAX_NOTE_CHARS 一致
 
 HELP = """\
 ### 🤖 Paper Gleaner 指令
@@ -34,10 +36,15 @@ HELP = """\
 | `/compare <ref> <ref> ...` | 多篇论文横向对比（最多 5 篇） |
 | `/compare <ref>` | 单篇论文与相关工作对比（相关工作来自 Semantic Scholar） |
 | `/more [n]` | 展开这份日报中打过分但没有推送的候选，默认 5 篇 |
+| `/like <ref> [原因]` | 喜欢这篇论文，之后多推荐类似的；原因每周汇总进学到的偏好 |
+| `/dislike <ref> [原因]` | 不喜欢这篇论文，之后少推荐类似的 |
+| `/mute <主题>` | 屏蔽一个主题，如 `/mute 医学影像`；不带参数时列出已屏蔽的主题 |
+| `/unmute <主题>` | 取消屏蔽 |
 | `/help` | 显示本帮助 |
 
 `<ref>` 可以是本 Issue 中的序号（如 `3`）、arXiv ID（如 `2410.12345`，版本号会被忽略）\
-或 arXiv 链接。`/more` 列出的候选接着日报往下编号，同样可以用序号引用。"""
+或 arXiv 链接。`/more` 列出的候选接着日报往下编号，同样可以用序号引用。\
+给论文评论点 👍 / 👎 也算反馈：下一次运行日报时同步，只统计仓库所有者的表情。"""
 
 
 def help_reply() -> str:
@@ -234,6 +241,68 @@ def more_reply(digest: Digest, items: Sequence[tuple[int, ScoredPaper]]) -> str:
         hints.append(f"`/more {min(last - len(digest.papers) + 5, 20)}` 查看更多")
     lines += ["", f"<sub>{' · '.join(hints)}</sub>"]
     return "\n".join(lines)
+
+
+# --- /like、/dislike、/mute、/unmute -------------------------------------------
+
+
+def feedback_reply(
+    paper: Paper,
+    signal: Literal["like", "dislike"],
+    *,
+    note: str | None,
+    replaced: bool = False,
+    notes: Sequence[str] = (),
+) -> str:
+    """/like、/dislike 的确认。replaced 表示覆盖了之前相反的一条。"""
+    icon, verb = ("👍", "喜欢") if signal == "like" else ("👎", "不喜欢")
+    text = f"{icon} 已记下：{verb} {paper_link(paper)}"
+    if note:
+        text += f"，原因：{code(note, limit=_MAX_NOTE_CHARS)}"
+    if replaced:
+        text += f"（覆盖了之前的 /{'dislike' if signal == 'like' else 'like'}）"
+    lines = [text + "。"]
+    if notes:
+        lines += ["", f"> ℹ️ {_join(notes)}"]
+    lines += ["", "<sub>下一次日报的粗筛就会参考这条反馈；每周汇总进学到的偏好</sub>"]
+    return "\n".join(lines)
+
+
+def mute_reply(
+    topic: str, muted: Sequence[str], *, query: str | None = None, already: bool = False
+) -> str:
+    """/mute 的确认；muted 是屏蔽之后的完整列表。"""
+    if already:
+        lines = [f"🔇 {code(topic)} 已经屏蔽过了。"]
+    else:
+        lines = [f"🔇 已屏蔽 {code(topic)}，之后的日报会把这类论文排到后面。"]
+        if query:
+            lines.append(f"英文检索描述：{sanitize(query)}")
+        else:
+            lines.append("> ⚠️ 英文检索描述暂时没有生成，下次运行日报时会自动补上。")
+    unmute = code(f"/unmute {topic}")
+    lines += ["", f"<sub>{muted_topics_text(muted)} · 评论 {unmute} 取消屏蔽</sub>"]
+    return "\n".join(lines)
+
+
+def unmute_reply(topic: str, muted: Sequence[str]) -> str:
+    return f"🔊 已取消屏蔽 {code(topic)}。\n\n<sub>{muted_topics_text(muted)}</sub>"
+
+
+def muted_list_reply(muted: Sequence[str]) -> str:
+    """/mute 不带参数时列出当前屏蔽的主题。"""
+    if not muted:
+        return "🔇 当前没有屏蔽任何主题。评论 `/mute <主题>` 屏蔽，例如 `/mute 医学影像`。"
+    lines = [f"🔇 当前屏蔽了 {len(muted)} 个主题：", ""]
+    lines += [f"- {code(topic)}" for topic in muted]
+    lines += ["", "<sub>评论 `/unmute <主题>` 取消屏蔽</sub>"]
+    return "\n".join(lines)
+
+
+def muted_topics_text(muted: Sequence[str]) -> str:
+    if not muted:
+        return "当前没有屏蔽任何主题"
+    return "当前屏蔽的主题：" + "、".join(code(topic) for topic in muted)
 
 
 # --- 公用片段 -------------------------------------------------------------------
