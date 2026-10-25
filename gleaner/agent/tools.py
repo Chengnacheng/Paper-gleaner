@@ -88,7 +88,7 @@ class ArxivIdArgs(_Args):
     @field_validator("arxiv_id")
     @classmethod
     def _valid_id(cls, value: str) -> str:
-        return _arxiv_id(value)
+        return arxiv_id_arg(value)
 
 
 class FulltextArgs(ArxivIdArgs):
@@ -440,13 +440,22 @@ def _paper_line(index: int, paper: ScoredPaper, found: Found, *, detail: bool) -
     return line
 
 
+def find_in_history(ctx: Context, paper_id: str) -> Paper | None:
+    """在推送过的论文和有反馈的论文中找这篇论文的元数据（标题、摘要），找不到时返回 None。"""
+    entry = _history_entries(ctx).get(paper_id)
+    if entry is None or not entry.title or entry.title == paper_id:
+        return None
+    return Paper(id=paper_id, title=entry.title, abstract=entry.abstract)
+
+
 def _known_paper(ctx: Context, paper_id: str) -> Paper | None:
     digest = ctx.digest
     candidates = [*digest.papers, *digest.others] if digest else []
     return next((paper for paper in candidates if paper.id == paper_id), None)
 
 
-def _arxiv_id(value: str) -> str:
+def arxiv_id_arg(value: str) -> str:
+    """校验并规范化 arXiv ID 参数（可以带版本号或写成链接）；不合法时抛出 ValueError。"""
     try:
         ref = parse_ref(value)
     except CommandError as e:

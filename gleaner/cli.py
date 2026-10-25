@@ -263,7 +263,7 @@ def handle_comment_command(
             config=config,
             replier=replier,
             branch=DataBranch(Path.cwd(), data_dir),
-            services=_services(config),
+            services=build_services(config),
             persist=not dry_run,
             pause_seconds=0 if dry_run else 1.0,
         )
@@ -388,7 +388,7 @@ def _run_local(
         store = DataBranch(Path.cwd(), data_dir).checkout()
         ctx = Context(
             config,
-            _services(config),
+            build_services(config),
             store,
             day=day.date() if day else latest_digest_day(store),
             persist=False,
@@ -399,7 +399,8 @@ def _run_local(
         raise typer.Exit(1) from e
 
 
-def _services(config: Config) -> Services:
+def build_services(config: Config) -> Services:
+    """命令行和 MCP Server 使用的外部服务；S2_API_KEY 从环境变量读取。"""
     api_key = os.environ.get("S2_API_KEY", "").strip() or None
     return Services(
         arxiv=ArxivSource(config.sources.arxiv),
