@@ -671,6 +671,26 @@ def test_local_compare(interact_repo: Path, html_text: str) -> None:
     assert "## ⚖️ 对比 · 2 篇论文" in result.output
 
 
+def test_local_ask(interact_repo: Path, git_remote: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request):
+        if "每一步只做一件事" in request["messages"][0]["content"]:
+            if len(request["messages"]) == 2:
+                return json.dumps({"action": "call_tool", "tool": "get_digest", "arguments": {}})
+            return json.dumps({"action": "answer"})
+        return "推荐先读 2610.00001。"
+
+    use_llm(monkeypatch, handler)
+    before = git("rev-parse", "gleaner-data", cwd=git_remote)
+
+    result = runner.invoke(app, ["ask", "今天先读哪篇？"])
+
+    assert result.exit_code == 0, result.output
+    assert "## 💬 /ask · `今天先读哪篇？`" in result.output
+    assert "推荐先读 2610.00001。" in result.output
+    assert "2 步（上限 8）" in result.output and "工具：get_digest" in result.output
+    assert git("rev-parse", "gleaner-data", cwd=git_remote) == before  # 不写数据
+
+
 def test_local_deep_reports_bad_refs(interact_repo: Path) -> None:
     result = runner.invoke(app, ["deep", "9"])
     assert result.exit_code == 1

@@ -109,7 +109,7 @@ def test_parse_command(text: str, command: Command) -> None:
 
 
 @pytest.mark.parametrize(
-    ("text", "name"), [("/ask 今天哪篇好？", "ask"), ("/", ""), ("/deep3", "deep3")]
+    ("text", "name"), [("/summarize 今天哪篇好？", "summarize"), ("/", ""), ("/deep3", "deep3")]
 )
 def test_unknown_command(text: str, name: str) -> None:
     with pytest.raises(UnknownCommandError) as info:
@@ -591,9 +591,9 @@ def test_more_escapes_candidates(config: Config, tmp_path: Path) -> None:
 
 def test_help(config: Config, store: DataStore) -> None:
     reply, _ = run("/help", config, store)
-    for implemented in ("/deep <ref>", "/like <ref> [原因]", "/dislike <ref>", "/mute", "/unmute"):
-        assert f"`{implemented}" in reply
-    assert "/ask" not in reply  # 只列出已经实现的指令
+    implemented = ("/deep <ref>", "/like <ref> [原因]", "/dislike <ref>", "/mute", "/unmute")
+    for name in (*implemented, "/ask <问题>"):
+        assert f"`{name}" in reply
 
 
 @respx.mock

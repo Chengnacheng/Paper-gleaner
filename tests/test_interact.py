@@ -254,10 +254,10 @@ def test_help_does_not_touch_data(config: Config, tmp_path: Path) -> None:
 
 
 def test_unknown_command_replies_with_help(config: Config, tmp_path: Path) -> None:
-    result, replier, _ = handle(config, FakeBranch(tmp_path), event("/ask 哪篇最好？"))
+    result, replier, _ = handle(config, FakeBranch(tmp_path), event("/summarize 哪篇最好？"))
 
     assert result.status == "rejected"
-    assert replier.bodies[0].startswith("⚠️ 不认识的指令 `/ask`。")
+    assert replier.bodies[0].startswith("⚠️ 不认识的指令 `/summarize`。")
     assert "`/compare <ref> <ref> ...`" in replier.bodies[0]
     assert replier.reactions == [(9001, "eyes"), (9001, "confused")]
 
@@ -371,3 +371,58 @@ def test_report_failure(config: Config) -> None:
     ignored = report_failure(event("hello"), replier, "配置有误", pause_seconds=0)
     assert ignored.status == "ignored"
     assert len(replier.comments) == 1
+
+
+# --- /ask -----------------------------------------------------------------------
+
+
+class CommentingReplier(FakeReplier):
+    """还能读取 Issue 的评论（和 GitHubClient.list_comments 返回的格式相同）。"""
+
+    def __init__(self, comments: list[dict[str, Any]]) -> None:
+        super().__init__()
+        self.existing = comments
+        self.listed: list[int] = []
+
+    def list_comments(self, issue_number: int) -> list[dict[str, Any]]:
+        self.listed.append(issue_number)
+        return self.existing
+
+
+def test_ask_reads_issue_comments_as_context(config: Config, tmp_path: Path) -> None:
+    replier = CommentingReplier(
+        [
+            {
+                "id": 1,
+                "user": {"login": "owner"},
+                "author_association": "OWNER",
+                "body": "关注检测",
+            },
+            {"id": 2, "user": {"login": "x"}, "author_association": "NONE", "body": "陌生人的话"},
+            {"id": 9001, "user": {"login": "owner"}, "author_association": "OWNER", "body": "/ask"},
+        ]
+    )
+    prompts: list[str] = []
+
+    def handler(request: dict[str, Any]) -> str:
+        prompts.append(request["messages"][1]["content"])
+        if "每一步只做一件事" in request["messages"][0]["content"]:
+            return json.dumps({"action": "answer"})
+        return "第 1 篇最合适（2610.00001）。"
+
+    result, replier, _ = handle(
+        config,
+        FakeBranch(tmp_path),
+        event("/ask 哪篇最适合检测？\n顺便看看第 2 篇"),
+        replier=replier,
+        handler=handler,
+    )
+
+    assert result.status == "done"
+    assert replier.listed == [1]
+    assert "<question>\n哪篇最适合检测？\n顺便看看第 2 篇\n</question>" in prompts[0]
+    assert "owner（OWNER）：关注检测" in prompts[0] and "陌生人的话" not in prompts[0]
+    [body] = replier.bodies
+    assert body.startswith("## 💬 /ask · `哪篇最适合检测？ 顺便看看第 2 篇`")
+    assert "- [LongKV: Hierarchical KV Cache Compression](https://arxiv.org/abs/2610.00001)" in body
+    assert replier.reactions == [(9001, "eyes"), (9001, "rocket")]

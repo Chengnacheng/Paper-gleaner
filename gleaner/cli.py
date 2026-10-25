@@ -300,6 +300,17 @@ def compare_command(
     _run_local(Command("compare", tuple(refs)), config_path, data_dir, day)
 
 
+@app.command("ask")
+def ask_command(
+    question: Annotated[str, typer.Argument(help="问题，例如「今天哪篇的方法最适合我的检测器？」")],
+    day: DayOption = None,
+    config_path: ConfigOption = None,
+    data_dir: DataDirOption = DEFAULT_DATA_DIR,
+) -> None:
+    """在本地向 Agent 提问（同 /ask），回答打印到终端（不发评论、不写数据分支）。"""
+    _run_local(Command("ask", rest=question), config_path, data_dir, day)
+
+
 @app.command("summarize-preferences")
 def summarize_preferences_command(
     config_path: ConfigOption = None,

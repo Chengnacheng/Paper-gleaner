@@ -100,6 +100,15 @@ class DeepReadConfig(_Section):
     timeout_seconds: float = Field(180, gt=0)
 
 
+class AskConfig(_Section):
+    """/ask 的工具调用循环（docs 3.2）。"""
+
+    max_steps: int = Field(8, ge=1, le=20)
+    # 单条 /ask 指令的 token 上限（各步输入加输出，按服务商返回的用量累计）；
+    # 接近上限时停止调用工具，基于已有信息作答
+    max_tokens: int = Field(60_000, ge=10_000)
+
+
 class LLMModels(_Section):
     fast: str = "deepseek-chat"
     deep: str = "deepseek-reasoner"
@@ -140,6 +149,7 @@ class Config(_Section):
     filters: FiltersConfig = Field(default_factory=FiltersConfig)
     ranking: RankingConfig = Field(default_factory=RankingConfig)
     deep_read: DeepReadConfig = Field(default_factory=DeepReadConfig)
+    ask: AskConfig = Field(default_factory=AskConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     notify: NotifyConfig = Field(default_factory=NotifyConfig)
 
