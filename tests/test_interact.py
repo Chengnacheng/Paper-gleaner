@@ -206,6 +206,41 @@ def test_deep_flow(config: Config, tmp_path: Path, html_text: str) -> None:
     assert "数据已提交到 gleaner-data" in result.message
 
 
+def test_like_flow(config: Config, tmp_path: Path) -> None:
+    branch = FakeBranch(tmp_path)
+
+    result, replier, fake = handle(config, branch, event("/like 1 有开源代码"))
+
+    assert result.status == "done"
+    assert replier.bodies[0].startswith("👍 已记下：喜欢 [LongKV")
+    assert replier.reactions == [(9001, "eyes"), (9001, "rocket")]
+    assert fake.requests == []
+    assert branch.commits == ["data: /like from issue 1"]  # 提交说明里不写用户写的原因
+    [record] = branch.store.read_jsonl("feedback/2026-10.jsonl")
+    assert (record["signal"], record["weight"], record["note"]) == ("like", 2.0, "有开源代码")
+
+
+def test_mute_list_commits_nothing(config: Config, tmp_path: Path) -> None:
+    class NoChanges(FakeBranch):
+        def commit_and_push(self, message: str) -> bool:
+            return False
+
+    branch = NoChanges(tmp_path)
+    result, replier, _ = handle(config, branch, event("/mute"))
+
+    assert result.status == "done"
+    assert replier.bodies[0].startswith("🔇 当前没有屏蔽任何主题")
+    assert "数据已提交" not in result.message
+
+
+def test_unmute_unknown_topic_is_rejected(config: Config, tmp_path: Path) -> None:
+    result, replier, _ = handle(config, FakeBranch(tmp_path), event("/unmute 医学影像"))
+
+    assert result.status == "rejected"
+    assert replier.bodies[0].startswith("⚠️ `医学影像` 不在屏蔽列表中。当前没有屏蔽任何主题")
+    assert replier.reactions[-1] == (9001, "confused")
+
+
 def test_help_does_not_touch_data(config: Config, tmp_path: Path) -> None:
     branch = FakeBranch(tmp_path)
 

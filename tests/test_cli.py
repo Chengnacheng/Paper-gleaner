@@ -11,10 +11,11 @@ from typer.testing import CliRunner
 
 from gleaner import __version__, cli
 from gleaner.cli import _report, app
-from gleaner.llm import LLMClient
-from gleaner.models import Digest, ScoredPaper
+from gleaner.llm import LLMClient, LLMError
+from gleaner.models import Digest, Paper, ScoredPaper
 from gleaner.notify import IssueRef
 from gleaner.pipelines.daily import DailyResult, digest_path
+from gleaner.profile import command_feedback, record_feedback
 from gleaner.store import DataBranch
 from tests.conftest import (
     DEEP_REPORT,
@@ -43,6 +44,7 @@ ENV_VARS = [
     "OPENAI_BASE_URL",
     "GITHUB_TOKEN",
     "GITHUB_REPOSITORY",
+    "GITHUB_REPOSITORY_OWNER",
     "GITHUB_API_URL",
     "GITHUB_STEP_SUMMARY",
     "GITHUB_EVENT_PATH",
@@ -167,6 +169,244 @@ def test_daily_skips_when_already_published(
     assert "今天的日报已经发布：https://github.com/o/r/issues/4" in result.output
     assert rss.call_count == 0
     assert not data_branch_exists(git_remote)
+
+
+def seed_data(clone: Callable[[str], Path], *digests: Digest) -> None:
+    """在远端的 gleaner-data 分支上放几份日报。"""
+    seed_repo = clone("data-seed")
+    seed = DataBranch(seed_repo, seed_repo / ".gleaner-data", backoff_seconds=0)
+    store = seed.checkout()
+    for digest in digests:
+        store.write_model(digest_path(digest.day), digest)
+    seed.commit_and_push("data: seed digests")
+
+
+def todays_digest(**fields) -> Digest:
+    """今天（按配置的时区）已发布的日报，评论都在。"""
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    comment_ids = {"2610.00001": 801, "2610.00002": 802}
+    return interact_digest(**({"day": today, "comment_ids": comment_ids} | fields))
+
+
+def reactions_json(*items: tuple[str, str]) -> list[dict]:
+    return [
+        {"id": i, "user": {"login": login, "type": "User"}, "content": content}
+        for i, (login, content) in enumerate(items, start=1)
+    ]
+
+
+@respx.mock
+def test_daily_dry_run_syncs_reactions_without_committing(
+    repo: Path,
+    clone: Callable[[str], Path],
+    rss_bytes: bytes,
+    git_remote: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed_data(clone, todays_digest())
+    github_env(monkeypatch)
+    monkeypatch.setenv("GITHUB_REPOSITORY_OWNER", "Owner")
+    before = git("rev-parse", "gleaner-data", cwd=git_remote)
+    respx.get(RSS_URL).mock(return_value=httpx.Response(200, content=rss_bytes))
+    first = respx.get(f"{API}/issues/comments/801/reactions").mock(
+        return_value=httpx.Response(200, json=reactions_json(("owner", "+1"), ("bob", "-1")))
+    )
+    respx.get(f"{API}/issues/comments/802/reactions").mock(
+        return_value=httpx.Response(200, json=reactions_json(("bob", "+1")))
+    )
+
+    result = runner.invoke(app, ["daily", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert first.called
+    assert "· 同步了 1 条表情反馈" in result.output
+    assert "[1] 9/10  2610.00001" in result.output
+    # 终端输出里有粗筛分数的分项和反馈统计，用来观察反馈是否生效
+    assert "    📊 粗筛 " in result.output
+    assert "+ 正反馈 " in result.output
+    assert "反馈：👍 1 · 👎 0" in result.output
+    assert "本次同步表情 1 条" in result.output
+    assert git("rev-parse", "gleaner-data", cwd=git_remote) == before  # dry-run 不写数据
+
+
+@respx.mock
+def test_daily_dry_run_warns_without_github_env(repo: Path, rss_bytes: bytes) -> None:
+    respx.get(RSS_URL).mock(return_value=httpx.Response(200, content=rss_bytes))
+
+    result = runner.invoke(app, ["daily", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output.startswith("! 没有 GITHUB_TOKEN 和 GITHUB_REPOSITORY，跳过表情同步")
+
+
+@respx.mock
+def test_daily_commits_synced_reactions_when_already_published(
+    repo: Path,
+    clone: Callable[[str], Path],
+    git_remote: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    digest = todays_digest(issue_number=4)
+    seed_data(clone, digest)
+    github_env(monkeypatch)  # 没有 GITHUB_REPOSITORY_OWNER 时从 GITHUB_REPOSITORY 取出 owner
+    existing = {
+        "number": 4,
+        "title": f"📚 Paper Gleaner · {digest.day.isoformat()} · 2 篇",
+        "html_url": "https://github.com/o/r/issues/4",
+        "created_at": f"{digest.day.isoformat()}T01:30:00Z",
+    }
+    respx.get(f"{API}/issues").mock(return_value=httpx.Response(200, json=[existing]))
+    respx.get(f"{API}/issues/comments/801/reactions").mock(
+        return_value=httpx.Response(200, json=reactions_json(("O", "-1")))
+    )
+    respx.get(f"{API}/issues/comments/802/reactions").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+
+    result = runner.invoke(app, ["daily"])
+
+    assert result.exit_code == 0, result.output
+    assert "今天的日报已经发布" in result.output
+    message = git("log", "-1", "--format=%s", "gleaner-data", cwd=git_remote)
+    assert message == f"data: sync reactions {digest.day.isoformat()}"
+    month = digest.day.strftime("%Y-%m")
+    saved = git("show", f"gleaner-data:feedback/{month}.jsonl", cwd=git_remote)
+    assert '"signal": "down"' in saved
+
+
+# --- 反馈与偏好 -----------------------------------------------------------------
+
+PREFERENCES_REPLY = {
+    "markdown": "### 偏好\n- 偏好有开源代码的工作（1 次 /like 提到）",
+    "changes": ["新增一条"],
+}
+
+
+def seed_feedback(clone: Callable[[str], Path]) -> None:
+    """gleaner-data 上的反馈和屏蔽主题。"""
+    seed_repo = clone("data-seed")
+    seed = DataBranch(seed_repo, seed_repo / ".gleaner-data", backoff_seconds=0)
+    store = seed.checkout()
+    now = datetime.now(ZoneInfo("UTC"))
+    liked = Paper(id="2610.00001", title="LongKV", abstract="We compress the KV cache.")
+    disliked = Paper(id="2610.00002", title="RAG Bench", abstract="A benchmark.")
+    bare = Paper(id="2610.00003", title="2610.00003", abstract="")
+    record_feedback(
+        store,
+        [
+            command_feedback(liked, "like", now=now, note="有开源代码"),
+            command_feedback(disliked, "dislike", now=now, note="纯 benchmark"),
+            command_feedback(bare, "deep", now=now),
+        ],
+        timezone="Asia/Shanghai",
+    )
+    store.append_jsonl(
+        "profile/muted.jsonl",
+        [
+            {"action": "mute", "topic": "医学影像", "query": "Medical imaging."},
+            {"action": "mute", "topic": "语音"},
+        ],
+    )
+    seed.commit_and_push("data: seed feedback")
+
+
+def use_llm(monkeypatch: pytest.MonkeyPatch, handler) -> FakeOpenAI:
+    fake = FakeOpenAI(handler)
+    monkeypatch.setattr(cli, "LLMClient", lambda config: LLMClient(config, client=fake))
+    return fake
+
+
+def test_feedback_command(repo: Path, clone: Callable[[str], Path], git_remote: Path) -> None:
+    seed_feedback(clone)
+    before = git("rev-parse", "gleaner-data", cwd=git_remote)
+
+    result = runner.invoke(app, ["feedback", "--days", "7"])
+
+    assert result.exit_code == 0, result.output
+    output = result.output
+    assert "反馈（最近 7 天，时间衰减半衰期 90 天）：共 3 篇论文" in output
+    assert "正反馈（A2） 2 篇：" in output
+    assert "  +2.0  权重 1.00  2610.00001  LongKV\n        /like · 原因：有开源代码" in output
+    assert "/deep · 只有 ID，不参与粗筛" in output
+    assert "负反馈（A3） 1 篇：\n  -2.0  权重 1.00  2610.00002  RAG Bench" in output
+    assert "屏蔽主题 2 个：\n  医学影像 —— Medical imaging.\n  语音 —— （还没有英文描述" in output
+    assert "（还没有，运行 gleaner summarize-preferences" in output
+    assert git("rev-parse", "gleaner-data", cwd=git_remote) == before
+
+
+def test_summarize_preferences_commits(
+    repo: Path,
+    clone: Callable[[str], Path],
+    git_remote: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed_feedback(clone)
+    fake = use_llm(monkeypatch, lambda request: json.dumps(PREFERENCES_REPLY, ensure_ascii=False))
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+
+    result = runner.invoke(app, ["summarize-preferences"])
+
+    assert result.exit_code == 0, result.output
+    assert "✓ 已把 2 篇论文的新反馈总结进 profile/learned_preferences.md。" in result.output
+    assert "· 新增一条" in result.output
+    assert "- 偏好有开源代码的工作（1 次 /like 提到）" in result.output
+    assert "我研究长上下文推理。" in fake.requests[0]["messages"][-1]["content"]
+    saved = git("show", "gleaner-data:profile/learned_preferences.md", cwd=git_remote)
+    assert saved.endswith("- 偏好有开源代码的工作（1 次 /like 提到）")
+    assert git("log", "-1", "--format=%s", "gleaner-data", cwd=git_remote) == (
+        "data: update learned preferences"
+    )
+    assert "```markdown\n<!-- gleaner:preferences" in summary.read_text(encoding="utf-8")
+
+    again = runner.invoke(app, ["summarize-preferences"])
+    assert "上次总结之后没有新反馈，不调用 LLM" in again.output
+    assert len(fake.requests) == 1
+
+
+def test_summarize_preferences_dry_run(
+    repo: Path, clone: Callable[[str], Path], git_remote: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed_feedback(clone)
+    use_llm(monkeypatch, lambda request: json.dumps(PREFERENCES_REPLY, ensure_ascii=False))
+    before = git("rev-parse", "gleaner-data", cwd=git_remote)
+
+    result = runner.invoke(app, ["summarize-preferences", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "试运行：会把 2 篇论文的新反馈总结进 profile/learned_preferences.md，没有提交。" in (
+        result.output
+    )
+    assert git("rev-parse", "gleaner-data", cwd=git_remote) == before
+
+
+def test_summarize_preferences_without_feedback(repo: Path, monkeypatch) -> None:
+    fake = use_llm(monkeypatch, lambda request: "{}")
+
+    result = runner.invoke(app, ["summarize-preferences"])
+
+    assert result.exit_code == 0, result.output
+    assert "上次总结之后没有新反馈，不调用 LLM" in result.output
+    assert fake.requests == []
+
+
+def test_summarize_preferences_llm_failure(
+    repo: Path, clone: Callable[[str], Path], git_remote: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed_feedback(clone)
+
+    def boom(request):
+        raise LLMError("调用 deepseek-chat 失败：Request timed out.")
+
+    use_llm(monkeypatch, boom)
+    before = git("rev-parse", "gleaner-data", cwd=git_remote)
+
+    result = runner.invoke(app, ["summarize-preferences"])
+
+    assert result.exit_code == 1
+    assert "✗ 偏好总结失败，profile/learned_preferences.md 保持不变" in result.output
+    assert git("rev-parse", "gleaner-data", cwd=git_remote) == before
 
 
 def test_daily_requires_github_env(repo: Path) -> None:

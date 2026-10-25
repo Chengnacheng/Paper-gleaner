@@ -1,11 +1,11 @@
 """Issue 评论指令的解析与分发（docs/architecture.md 3.2）。
 
-指令写在评论第一行，例如 "/deep 3 --force"、"/compare 3 5"、"/more 10"。
+指令写在评论第一行，例如 "/deep 3 --force"、"/compare 3 5"、"/like 3 有开源代码"、"/mute 医学影像"。
 <ref> 支持三种写法：当前 Issue 中的序号、arXiv ID（可带版本号）、arXiv 链接。
 序号按这个 Issue 对应的那一天解析，所以在旧日报下评论同样有效；
 日报推荐的论文编号 1…N，/more 列出的候选接着编号 N+1…。
 
-这里只负责「做什么」：返回回复的 Markdown，并把报告缓存、隐式反馈写进 DataStore；
+这里只负责「做什么」：返回回复的 Markdown，并把报告缓存、反馈写进 DataStore；
 发评论、加表情、提交数据分支由 pipelines/interact.py 完成。
 """
 
@@ -17,16 +17,31 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from functools import cached_property
-from typing import Literal
 from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 
 from gleaner.config import Config
 from gleaner.llm import LLMClient, LLMError
-from gleaner.models import Digest, Feedback, Paper
+from gleaner.models import Digest, Paper
 from gleaner.pipelines.daily import DIGEST_DIR, digest_path
-from gleaner.profile import ProfileError, load_interests
+from gleaner.profile import (
+    ProfileError,
+    clean_note,
+    command_feedback,
+    load_feedback,
+    load_interests,
+    record_feedback,
+)
+from gleaner.profile.memory import CommandSignal
+from gleaner.profile.muted import (
+    MAX_TOPIC_CHARS,
+    MuteEvent,
+    append_event,
+    describe_topic,
+    find_topic,
+    load_muted,
+)
 from gleaner.reader import (
     MAX_COMPARE_PAPERS,
     FullText,
@@ -43,23 +58,30 @@ from gleaner.render.replies import (
     compare_reply,
     deep_fallback_reply,
     deep_reply,
+    feedback_reply,
     help_reply,
     more_reply,
+    mute_reply,
+    muted_list_reply,
+    muted_topics_text,
     related_fallback_reply,
     related_reply,
+    unmute_reply,
 )
 from gleaner.sources import ArxivSource, SemanticScholar, SourceError
 from gleaner.store import DataStore
 
-COMMANDS = ("deep", "compare", "more", "help")
+COMMANDS = ("deep", "compare", "more", "like", "dislike", "mute", "unmute", "help")
 DEFAULT_MORE = 5
 MAX_MORE = 20
-FEEDBACK_DIR = "feedback"
-IMPLICIT_FEEDBACK_WEIGHT = 0.5  # /deep、/compare 作为隐式正反馈（docs 3.4）
 
 _FORCE_FLAGS = {"--force", "-f"}
 # 参数之间可以用空格、逗号或顿号分隔："/compare 3 5"、"/compare 3,5"、"/compare 3、5"
 _ARG_SEPARATOR = re.compile(r"[\s,，、]+")
+# 指令名和其后的原文
+_NAME_AND_REST = re.compile(r"[\s,，、]*([^\s,，、]*)[\s,，、]*(.*)", re.DOTALL)
+# /like、/dislike 的 <ref> 和原因："/like 3 有开源代码"、"/like 3，有开源代码"、"/like 3：…"
+_REF_AND_NOTE = re.compile(r"([^\s,，、：]+)[\s,，、：]*(.*)", re.DOTALL)
 _ARXIV_ID_RE = re.compile(r"^(?:arxiv:)?(\d{4}\.\d{4,5})(?:v\d+)?$", re.IGNORECASE)
 _ARXIV_URL_RE = re.compile(
     r"^(?:https?://)?(?:www\.|export\.)?arxiv\.org/(?:abs|pdf|html)/"
@@ -87,6 +109,8 @@ class Command:
     name: str
     args: tuple[str, ...] = ()
     force: bool = False
+    # 指令名之后的原文（第一行）：/like 的原因、/mute 的主题取自这里，保留其中的标点和空格
+    rest: str = field(default="", compare=False)
 
     @property
     def text(self) -> str:
@@ -112,7 +136,7 @@ class Context:
     store: DataStore
     day: date | None = None  # 当前 Issue 对应的日报日期；None 表示不是日报 Issue
     issue_number: int | None = None
-    persist: bool = True  # 写入报告缓存和隐式反馈；本地调试时为 False
+    persist: bool = True  # 写入报告缓存、反馈和屏蔽主题；本地调试时为 False
     now: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     @cached_property
@@ -144,14 +168,15 @@ def parse_command(body: str) -> Command:
     first = lines[0].strip() if lines else ""
     if not first.startswith("/"):
         raise CommandError("指令需要以 / 开头")
-    tokens = [token for token in _ARG_SEPARATOR.split(first[1:]) if token]
-    name = tokens[0].lower() if tokens else ""
+    match = _NAME_AND_REST.match(first[1:])
+    assert match is not None  # 两个分组都可以为空，总能匹配
+    name, rest = match.group(1).lower(), match.group(2).strip()
     if name not in COMMANDS:
         raise UnknownCommandError(name)
-    rest = tokens[1:]
-    force = any(token.lower() in _FORCE_FLAGS for token in rest)
-    args = tuple(token for token in rest if token.lower() not in _FORCE_FLAGS)
-    return Command(name, args, force)
+    tokens = [token for token in _ARG_SEPARATOR.split(rest) if token]
+    force = any(token.lower() in _FORCE_FLAGS for token in tokens)
+    args = tuple(token for token in tokens if token.lower() not in _FORCE_FLAGS)
+    return Command(name, args, force, rest)
 
 
 def parse_ref(token: str) -> Ref:
@@ -181,7 +206,16 @@ def latest_digest_day(store: DataStore) -> date | None:
 
 def execute(command: Command, ctx: Context) -> str:
     """执行指令，返回回复的 Markdown。用户能修正的问题抛出 CommandError。"""
-    handlers = {"deep": _deep, "compare": _compare, "more": _more, "help": _help}
+    handlers = {
+        "deep": _deep,
+        "compare": _compare,
+        "more": _more,
+        "like": _like,
+        "dislike": _dislike,
+        "mute": _mute,
+        "unmute": _unmute,
+        "help": _help,
+    }
     return handlers[command.name](command, ctx)
 
 
@@ -298,6 +332,84 @@ def _more(command: Command, ctx: Context) -> str:
     return more_reply(digest, items)
 
 
+def _like(command: Command, ctx: Context) -> str:
+    return _explicit_feedback(command, ctx, "like")
+
+
+def _dislike(command: Command, ctx: Context) -> str:
+    return _explicit_feedback(command, ctx, "dislike")
+
+
+def _explicit_feedback(command: Command, ctx: Context, signal: CommandSignal) -> str:
+    """/like、/dislike：立即写入 ±2 的反馈，原因存进 note。"""
+    match = _REF_AND_NOTE.match(command.rest)
+    if match is None:
+        example = "有开源代码" if signal == "like" else "纯 benchmark"
+        raise CommandError(f"用法：`/{signal} <ref> [原因]`，例如 `/{signal} 3 {example}`")
+    [paper], notes = resolve_papers([parse_ref(match.group(1))], ctx)
+    note = clean_note(match.group(2))
+    if paper.title == paper.id:
+        # arXiv API 不可用：不为一条反馈去下载全文，只记下 ID
+        notes = [
+            "arXiv API 暂时不可用，只记下了论文 ID：这条反馈不参与粗筛，原因仍会进入每周的偏好总结"
+        ]
+
+    today = ctx.now.astimezone(ZoneInfo(ctx.config.timezone)).date()
+    earlier = [
+        record.signal
+        for record in load_feedback(ctx.store, today)
+        if record.paper_id == paper.id and record.signal in ("like", "dislike")
+    ]
+    _record_feedback(ctx, [paper], signal, note=note)
+    replaced = bool(earlier) and earlier[-1] != signal
+    return feedback_reply(paper, signal, note=note, replaced=replaced, notes=notes)
+
+
+def _mute(command: Command, ctx: Context) -> str:
+    """/mute <主题>：追加一条 mute 事件；不带参数时列出当前屏蔽的主题。"""
+    muted = load_muted(ctx.store)
+    topic = " ".join(command.rest.split())
+    if not topic:
+        return muted_list_reply([item.topic for item in muted])
+    if len(topic) > MAX_TOPIC_CHARS:
+        raise CommandError(
+            f"主题太长（{len(topic)} 个字）：请写成 {MAX_TOPIC_CHARS} 个字以内的简短主题，"
+            "例如 `/mute 医学影像`"
+        )
+    if (existing := find_topic(muted, topic)) is not None:
+        return mute_reply(existing.topic, [item.topic for item in muted], already=True)
+
+    query, model = None, None
+    try:
+        query = describe_topic(topic, ctx.llm)
+        model = ctx.llm.model_for("fast")
+    except LLMError as e:
+        # 先记下屏蔽，英文描述留到下次运行日报时补上
+        logger.warning("生成屏蔽主题的英文描述失败：%s", e)
+    if ctx.persist:
+        event = MuteEvent(action="mute", topic=topic, query=query, model=model, created_at=ctx.now)
+        append_event(ctx.store, event)
+    return mute_reply(topic, [*(item.topic for item in muted), topic], query=query)
+
+
+def _unmute(command: Command, ctx: Context) -> str:
+    """/unmute <主题>：追加一条 unmute 事件。"""
+    muted = load_muted(ctx.store)
+    topic = " ".join(command.rest.split())
+    current = muted_topics_text([item.topic for item in muted])
+    if not topic:
+        raise CommandError(f"用法：`/unmute <主题>`。{current}")
+    existing = find_topic(muted, topic)
+    if existing is None:
+        raise CommandError(f"{code(topic)} 不在屏蔽列表中。{current}")
+    if ctx.persist:
+        append_event(
+            ctx.store, MuteEvent(action="unmute", topic=existing.topic, created_at=ctx.now)
+        )
+    remaining = [item.topic for item in muted if item is not existing]
+    return unmute_reply(existing.topic, remaining)
+
+
 def resolve_papers(refs: list[Ref], ctx: Context) -> tuple[list[Paper], list[str]]:
     """把 <ref> 解析成论文（去掉重复的），同时返回降级说明。
 
@@ -391,22 +503,10 @@ def _fetch(paper: Paper, ctx: Context) -> tuple[Paper, FullText]:
 
 
 def _record_feedback(
-    ctx: Context, papers: Iterable[Paper], signal: Literal["deep", "compare"]
+    ctx: Context, papers: Iterable[Paper], signal: CommandSignal, note: str | None = None
 ) -> None:
-    """把 /deep、/compare 记为隐式正反馈（只写不读，留给 Phase 3）。"""
+    """写入指令产生的反馈（/deep、/compare 为隐式正反馈），本地调试时不写。"""
     if not ctx.persist:
         return
-    month = ctx.now.astimezone(ZoneInfo(ctx.config.timezone)).strftime("%Y-%m")
-    records = [
-        Feedback(
-            paper_id=paper.id,
-            title=paper.title,
-            abstract=paper.abstract,
-            signal=signal,
-            weight=IMPLICIT_FEEDBACK_WEIGHT,
-            source="command",
-            created_at=ctx.now,
-        ).model_dump(mode="json")
-        for paper in papers
-    ]
-    ctx.store.append_jsonl(f"{FEEDBACK_DIR}/{month}.jsonl", records)
+    records = [command_feedback(paper, signal, now=ctx.now, note=note) for paper in papers]
+    record_feedback(ctx.store, records, timezone=ctx.config.timezone)

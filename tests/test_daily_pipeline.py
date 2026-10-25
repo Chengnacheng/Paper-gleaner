@@ -1,17 +1,34 @@
+import json
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from gleaner.config import Config
 from gleaner.filters import record_seen
-from gleaner.models import Digest, Paper
-from gleaner.notify import IssueRef
+from gleaner.llm import LLMError
+from gleaner.models import Digest, Paper, ScoredPaper
+from gleaner.notify import GitHubError, IssueRef
 from gleaner.pipelines.daily import digest_path, run_daily
-from gleaner.profile import ProfileError
+from gleaner.profile import (
+    LEARNED_PREFERENCES_PATH,
+    ProfileError,
+    command_feedback,
+    load_feedback,
+    load_muted,
+    record_feedback,
+)
+from gleaner.profile.muted import MUTED_PATH
 from gleaner.sources.arxiv import parse_rss
 from gleaner.store import DataStore
-from tests.conftest import PIPELINE_VOCABULARY, KeywordEmbedder, fake_llm, pipeline_llm
+from tests.conftest import (
+    FIXTURES,
+    PIPELINE_VOCABULARY,
+    KeywordEmbedder,
+    fake_llm,
+    pipeline_llm,
+)
 
 TODAY = date(2026, 10, 26)
 SCORES = {"2610.00001": 9, "2610.00002": 7, "2610.00003": 4}
@@ -57,6 +74,38 @@ class FakePublisher:
     def close_stale(self, now: datetime | None = None) -> list[int]:
         self.closed += 1
         return []
+
+
+class FakeReader:
+    """代替 GitHubClient 读取评论表情；error 不为空时每次都抛出。"""
+
+    def __init__(self, reactions: dict[int, list[dict]] | None = None, error=None) -> None:
+        self.reactions = reactions or {}
+        self.error = error
+        self.calls: list[int] = []
+
+    def list_reactions(self, comment_id: int) -> list[dict[str, Any]]:
+        self.calls.append(comment_id)
+        if self.error is not None:
+            raise self.error
+        return self.reactions.get(comment_id, [])
+
+
+def thumbs(login: str, content: str) -> dict[str, Any]:
+    return {"id": 1, "user": {"login": login, "type": "User"}, "content": content}
+
+
+def seed_yesterday(store: DataStore) -> None:
+    """昨天的日报：一篇论文，评论 ID 为 501。"""
+    paper = ScoredPaper(id="2610.00009", title="Yesterday", abstract="KV cache again.")
+    yesterday = Digest(
+        day=date(2026, 10, 25),
+        generated_at=datetime(2026, 10, 25, 1, 30, tzinfo=UTC),
+        papers=[paper],
+        issue_number=6,
+        comment_ids={paper.id: 501},
+    )
+    store.write_model(digest_path(yesterday.day), yesterday)
 
 
 @pytest.fixture
@@ -269,3 +318,181 @@ def test_no_sampling_when_publishing(config: Config, papers: list[Paper], tmp_pa
 
     assert result.status == "no_announcements"
     assert source.recent_limits == []
+
+
+# --- 第 0 步：表情同步 -----------------------------------------------------------
+
+
+def test_syncs_reactions_first(config: Config, papers: list[Paper], tmp_path: Path) -> None:
+    store = DataStore(tmp_path)
+    seed_yesterday(store)
+    reader = FakeReader({501: [thumbs("Owner", "+1"), thumbs("someone", "-1")]})
+
+    result, _, _ = run(config, store, papers, reactions=reader, owner="owner")
+
+    assert reader.calls == [501]
+    assert (result.sync.records, result.sync.error, result.warnings) == (1, None, [])
+    assert [(r.paper_id, r.signal) for r in load_feedback(store, TODAY)] == [("2610.00009", "up")]
+    assert result.digest.stats.feedback.synced == 1
+
+
+def test_sync_failure_does_not_block_the_digest(
+    config: Config, papers: list[Paper], tmp_path: Path
+) -> None:
+    store = DataStore(tmp_path)
+    seed_yesterday(store)
+    reader = FakeReader(error=GitHubError("查询表情失败（HTTP 403）：rate limit", 403))
+
+    result, _, _ = run(config, store, papers, reactions=reader, owner="owner")
+
+    assert result.status == "preview"
+    assert [p.id for p in result.digest.papers] == ["2610.00001", "2610.00002"]
+    assert result.digest.stats.feedback.sync_error == "查询表情失败（HTTP 403）：rate limit"
+    [warning] = result.warnings
+    assert "表情同步没有完成" in warning and "rate limit" in warning
+    assert load_feedback(store, TODAY) == []
+
+
+def test_syncs_even_when_already_published(
+    config: Config, papers: list[Paper], tmp_path: Path
+) -> None:
+    store = DataStore(tmp_path)
+    seed_yesterday(store)
+    reader = FakeReader({501: [thumbs("owner", "-1")]})
+    publisher = FakePublisher(IssueRef(3, "https://x/3"))
+
+    result, _, source = run(
+        config, store, papers, publisher=publisher, reactions=reader, owner="owner"
+    )
+
+    assert result.status == "already_published"
+    assert source.calls == 0
+    assert result.sync.records == 1
+
+
+def test_skips_sync_without_reader(config: Config, papers: list[Paper], tmp_path: Path) -> None:
+    store = DataStore(tmp_path)
+    seed_yesterday(store)
+
+    result, _, _ = run(config, store, papers)
+
+    assert (result.sync.records, result.sync.error) == (0, None)
+    assert load_feedback(store, TODAY) == []
+
+
+def test_reads_phase2_digest() -> None:
+    # Phase 2 保存的 digest（没有粗筛分项和反馈统计字段）仍能读取，新字段取默认值
+    text = (FIXTURES / "digest_phase2.json").read_text(encoding="utf-8")
+    digest = Digest.model_validate_json(text)
+
+    assert digest.issue_number == 1
+    assert digest.comment_ids == {"2610.19540": 6388934280, "2610.04922": 6388934591}
+    paper = digest.papers[0]
+    assert paper.coarse_score == 0.8093
+    assert (paper.interest_score, paper.positive_score, paper.negative_score) == (None, None, None)
+    assert digest.stats.feedback.empty
+
+
+# --- 反馈参与粗筛 ---------------------------------------------------------------
+
+
+def with_describer(scores=SCORES, *, fail: bool = False):
+    """在 pipeline_llm 之外再处理屏蔽主题的英文描述。"""
+    base = pipeline_llm(scores)
+
+    def handler(request: dict[str, Any]) -> str:
+        if "要屏蔽的一个主题" in request["messages"][0]["content"]:
+            if fail:
+                raise LLMError("额度用完")
+            return json.dumps({"query": "Medical imaging with deep networks."})
+        return base(request)
+
+    return handler
+
+
+def test_feedback_shapes_coarse_scores(config: Config, papers: list[Paper], tmp_path: Path) -> None:
+    store = DataStore(tmp_path)
+    liked = Paper(id="2609.00001", title="Fast attention", abstract="Attention kernels, attention.")
+    disliked = Paper(id="2609.00002", title="Retrieval benchmark", abstract="Retrieval.")
+    record_feedback(
+        store,
+        [
+            command_feedback(liked, "like", now=datetime(2026, 10, 20, tzinfo=UTC)),
+            command_feedback(disliked, "dislike", now=datetime(2026, 10, 21, tzinfo=UTC)),
+        ],
+        timezone=config.timezone,
+    )
+
+    result, _, _ = run(config, store, papers)
+
+    by_id = {p.id: p for p in [*result.digest.papers, *result.digest.others]}
+    attention, rag = by_id["2610.00003"], by_id["2610.00002"]
+    assert attention.positive_score > rag.positive_score
+    assert rag.negative_score > attention.negative_score
+    assert attention.coarse_score == pytest.approx(
+        attention.interest_score + attention.positive_score - attention.negative_score, abs=1e-3
+    )
+    feedback = result.digest.stats.feedback
+    assert (feedback.like, feedback.dislike, feedback.positive, feedback.negative) == (1, 1, 1, 1)
+    saved = store.read_model(digest_path(TODAY), Digest)
+    assert saved.papers[0].interest_score is not None
+
+
+def test_backfills_muted_topic_descriptions(
+    config: Config, papers: list[Paper], tmp_path: Path
+) -> None:
+    store = DataStore(tmp_path)
+    store.append_jsonl(MUTED_PATH, [{"action": "mute", "topic": "医学影像"}])  # 手写的，没有描述
+    llm, fake = fake_llm(with_describer())
+
+    result = run_daily(
+        config,
+        store=store,
+        llm=llm,
+        embedder=KeywordEmbedder(PIPELINE_VOCABULARY),
+        today=TODAY,
+        source=FakeSource(papers),
+        now=datetime(2026, 10, 26, 1, 30, tzinfo=UTC),
+    )
+
+    assert len(fake.requests) == 4  # 兴趣拆解 + 屏蔽主题描述 + 精排 + 概览
+    assert [m.query for m in load_muted(store)] == ["Medical imaging with deep networks."]
+    assert result.digest.stats.feedback.muted == 1
+    assert result.warnings == []
+
+
+def test_muted_description_failure_is_a_warning(
+    config: Config, papers: list[Paper], tmp_path: Path
+) -> None:
+    store = DataStore(tmp_path)
+    store.append_jsonl(MUTED_PATH, [{"action": "mute", "topic": "医学影像"}])
+    llm, _ = fake_llm(with_describer(fail=True))
+
+    result = run_daily(
+        config,
+        store=store,
+        llm=llm,
+        embedder=KeywordEmbedder(PIPELINE_VOCABULARY),
+        today=TODAY,
+        source=FakeSource(papers),
+    )
+
+    assert result.status == "preview"
+    [warning] = result.warnings
+    assert "屏蔽主题「医学影像」的英文描述没有生成" in warning
+
+
+def test_rerank_sees_preferences_and_muted_topics(
+    config: Config, papers: list[Paper], tmp_path: Path
+) -> None:
+    store = DataStore(tmp_path)
+    store.write_text(LEARNED_PREFERENCES_PATH, "<!-- gleaner:note x -->\n### 偏好\n- 有开源代码")
+    store.append_jsonl(MUTED_PATH, [{"action": "mute", "topic": "医学影像", "query": "Medical."}])
+
+    _, fake, _ = run(config, store, papers)
+
+    [rerank_request] = [r for r in fake.requests if "<paper id=" in r["messages"][-1]["content"]]
+    system = rerank_request["messages"][0]["content"]
+    assert "<preferences>\n### 偏好\n- 有开源代码\n</preferences>" in system
+    assert "<muted>\n- 医学影像\n</muted>" in system
+    assert "gleaner:note" not in system

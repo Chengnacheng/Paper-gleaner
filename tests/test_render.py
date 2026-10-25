@@ -1,6 +1,6 @@
 from datetime import UTC, date, datetime
 
-from gleaner.models import Digest, RunStats, ScoredPaper
+from gleaner.models import Digest, FeedbackStats, RunStats, ScoredPaper
 from gleaner.render import issue_body, issue_title, paper_section, sanitize, stats_line
 from gleaner.render.markdown import split_comment
 
@@ -119,6 +119,29 @@ def test_stats_line() -> None:
     assert "token 32.0k（输入 31.2k / 输出 850）" in line
     assert "耗时 2 分 13 秒" in line
     assert "精排失败 1 批" in line
+
+
+def test_stats_line_with_feedback() -> None:
+    assert "反馈" not in stats_line(RunStats())  # 冷启动时不显示
+
+    feedback = FeedbackStats(
+        up=2,
+        down=1,
+        like=1,
+        implicit=3,
+        positive=4,
+        negative=2,
+        muted=1,
+        synced=3,
+        sync_error="查询表情失败（HTTP 403）：@someone <b>rate limit</b>",
+    )
+    line = stats_line(RunStats(feedback=feedback))
+
+    assert "反馈：👍 2 · 👎 1 · /like 1 · /dislike 0 · /deep、/compare 3" in line
+    assert "粗筛锚点：正反馈 4 篇 · 负反馈 2 篇 · 屏蔽主题 1 个 · 本次同步表情 3 条" in line
+    assert "⚠️ 表情同步没有完成：查询表情失败（HTTP 403）：@​someone &lt;b&gt;rate limit" in line
+    body = issue_body(make_digest(stats=RunStats(feedback=feedback)))
+    assert "粗筛锚点：正反馈 4 篇" in body.split("<details><summary>本次运行</summary>")[1]
 
 
 def test_split_comment_keeps_short_bodies() -> None:
