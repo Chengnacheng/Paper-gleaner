@@ -9,7 +9,7 @@
 - 支持邮件、飞书、企业微信推送，以及 Claude Code Skill/MCP；
 - 适配 DeepSeek、Qwen 等低价模型。
 
-> 项目处于早期开发阶段：每日日报（Phase 1）、Issue 指令交互（Phase 2）和反馈学习（Phase 3）已可用，多渠道推送、`/ask` 等功能还在开发中。总体架构与实施路线见 [docs/architecture.md](docs/architecture.md)。
+> 项目处于早期开发阶段：每日日报（Phase 1）、Issue 指令交互（Phase 2）、反馈学习（Phase 3），以及邮件 / 飞书 / 企业微信推送、日报自动深读和 Zotero 输入（Phase 4 上半部分）已可用；`/ask`、MCP、Claude Code Skill 还在开发中。总体架构与实施路线见 [docs/architecture.md](docs/architecture.md)。
 
 ## 在 GitHub Actions 上使用
 
@@ -18,7 +18,66 @@
 3. 把 `config.example.yaml` 复制为 `config.yaml`，至少改一下要关注的 arXiv 分类；
 4. 在 Actions 页面打开 **Daily digest**，点 Run workflow 手动运行一次。可以先勾选 dry_run 试跑：只跑流程、不发 Issue；周末和节假日 arXiv 没有新公告时，试运行会改用最近提交的 20 篇论文，照样能检查大模型和嵌入模型是否配置正确。
 
-之后每个工作日北京时间 09:30 自动运行，日报发成带 `daily` 标签的 Issue；每周日晚上 **Weekly preferences** 把一周的反馈总结成「学到的偏好」（见[反馈与记忆](#反馈与记忆)）。运行产生的数据（去重记录、兴趣拆解缓存、每日结果和统计、深读报告、反馈、屏蔽主题、学到的偏好）保存在 `gleaner-data` 分支，不会污染 `main`。
+之后每个工作日北京时间 09:30 自动运行，日报发成带 `daily` 标签的 Issue，排在第一的论文会自动深读、报告折叠在它的评论里（`deep_read.auto_top_m`，设为 0 关闭）；还可以同时推送到[邮件、飞书、企业微信](#推送到邮件飞书企业微信)；每周日晚上 **Weekly preferences** 把一周的反馈总结成「学到的偏好」（见[反馈与记忆](#反馈与记忆)）。运行产生的数据（去重记录、兴趣拆解缓存、每日结果和统计、深读报告、反馈、屏蔽主题、学到的偏好）保存在 `gleaner-data` 分支，不会污染 `main`。
+
+## 推送到邮件、飞书、企业微信
+
+日报发布后，可以把摘要（标题、相关理由、TL;DR）和日报 Issue 的链接推送到邮件、飞书或企业微信，交互仍然在 Issue 里进行。各渠道互不影响：某个渠道失败只在运行结果里给出警告，11:30 的兜底运行会补发失败的渠道，已经发出去的不会重复发送。没有达到 `min_score` 的日子、周末和 dry-run 都不推送。
+
+1. 在仓库 Settings → Secrets and variables → Actions 中添加下面各渠道需要的 Secrets（地址、密码这类密钥只能放在这里，写进 `config.yaml` 会直接报错）；
+2. 在 `config.yaml` 中启用对应的渠道，例如 `notify: {feishu: {enabled: true}}`，可以只启用其中一部分；
+3. 在 Actions 页面运行 **Daily digest**，勾选 notify_test：只给已启用的渠道各发一条测试消息，不运行日报（本地也可以运行 `gleaner notify-test`）。`gleaner check` 会列出各渠道的配置状态。
+
+**邮件**（`notify.email`，可选 `subject_prefix` 修改邮件标题前缀）
+
+| Secret | 说明 |
+| --- | --- |
+| `SMTP_HOST` | QQ 邮箱 `smtp.qq.com`，163 邮箱 `smtp.163.com`，Gmail `smtp.gmail.com` |
+| `SMTP_PORT` | 可选，默认 465（SSL）；填 587 时走 STARTTLS |
+| `SMTP_USER` | 完整的邮箱地址，同时作为发件人 |
+| `SMTP_PASSWORD` | 邮箱的**授权码**（Gmail 是应用专用密码），不是登录密码 |
+| `EMAIL_TO` | 收件人，多个地址用逗号分隔 |
+
+- QQ 邮箱：网页版「设置 → 账号」，找到「POP3/IMAP/SMTP/Exchange/CardDAV/CalDAV服务」，开启 IMAP/SMTP 服务，按提示验证后生成授权码；
+- 163 邮箱：网页版「设置 → POP3/SMTP/IMAP」，开启 IMAP/SMTP 服务，按提示获取授权码；
+- Gmail：先开启两步验证，再在 Google 账号的「应用专用密码」中生成一个。
+
+（菜单名称以邮箱当前的版本为准。）
+
+**飞书**（`notify.feishu`，可选 `max_papers`，默认卡片里最多列 10 篇）
+
+1. 在飞书群中打开「设置 → 群机器人 → 添加机器人 → 自定义机器人」，复制 Webhook 地址，添加为 Secret `FEISHU_WEBHOOK`；
+2. 在机器人的「安全设置」中勾选「签名校验」，把显示的密钥添加为 Secret `FEISHU_SECRET`（推荐）。不要用 IP 白名单：GitHub Actions 的出口 IP 不固定；如果用自定义关键词，把 `Paper Gleaner` 设为关键词。
+
+**企业微信**（`notify.wecom`，可选 `max_papers`，默认 5 篇：消息最多 4096 字节）
+
+在群聊中打开「… → 添加群机器人 → 新建」，复制 Webhook 地址，添加为 Secret `WECOM_WEBHOOK`。
+
+> Webhook 地址相当于密码，拿到它的人就能往群里发消息。Paper Gleaner 只从 Secrets 读取它，不会打印到日志或写进运行结果；如果不小心泄露了，在群机器人设置中重置地址。
+
+## Zotero（可选）
+
+可以把 Zotero 文库作为兴趣锚点之一，和兴趣描述一起参与粗筛：和文库里的文献越像，粗筛分数越高（权重 `ranking.weights.zotero`，默认 0.5）。它只是补充，兴趣描述仍然必需。
+
+1. **找到 ID**：个人文库登录 zotero.org 后打开 [API Keys 页面](https://www.zotero.org/settings/keys)，页面上的「Your userID for use in API calls is …」就是用户 ID；群组文库在 zotero.org 打开群组页面，地址 `https://www.zotero.org/groups/<数字>/...` 中的数字就是群组 ID。把它添加为 Secret `ZOTERO_ID`；
+2. **申请 API Key**：在同一页面点「Create new private key」，勾选「Allow library access」（只读即可）；群组文库还要在「Default Group Permissions」或对应群组中给只读权限。保存后把 Key 添加为 Secret `ZOTERO_KEY`；
+3. **配置**：在 `config.yaml` 中：
+
+```yaml
+profile:
+  zotero:
+    enabled: true
+    library_type: user             # 群组文库填 group
+    collections: [Detection]       # 可选：限定 collection，写名称或 key；不写时使用整个文库
+    include_subcollections: true   # 是否包含子 collection
+    max_items: 200                 # 最多取多少篇作为锚点
+```
+
+- 会跳过附件、笔记、回收站里的条目和重复项（按 DOI、arXiv ID、标题判断）。超过 `max_items` 时按加入文库的时间从新到旧、在各 collection 之间轮流取；
+- collection 名称有重名时会报错，请改用 key：在 zotero.org 网页版打开这个 collection，地址栏中 `/collections/` 后面的 8 位字符就是它的 key；
+- **隐私**：文库内容只缓存在 GitHub Actions 的缓存里（`~/.cache/paper-gleaner/zotero`，文库没有变化时不重新下载），不会提交到 `gleaner-data` 等任何分支，Issue、日志和推送消息里只显示数量，例如「Zotero：使用 200 / 1342 篇」。注意 Actions 缓存能被本仓库的 workflow 读取，包括你批准运行的 Pull Request 的 workflow；
+- 读取失败时改用上次的缓存，没有缓存就这次不用 Zotero，日报照常发出；
+- 怎么看效果：`gleaner daily --dry-run` 打印的粗筛分项中会出现「+ Zotero」，日报「本次运行」里显示实际使用的篇数。
 
 ## 在 Issue 中交互
 
@@ -40,6 +99,7 @@
 - 只响应仓库所有者和协作者的评论，Issue 必须带 `gleaner` 标签（日报自动带上）。
 - `/deep`、`/compare` 使用 deep 档模型，单条指令的输入不超过 `deep_read.max_input_tokens`（默认 30000）。可选添加 Secret `S2_API_KEY` 提高 Semantic Scholar 的请求限额；没有时偶尔会被限流，回复中会注明缺少相关工作部分。
 - 外部服务失败时指令不会失败：拿不到全文就基于摘要分析，LLM 调用失败就先回复摘要和代码链接。
+- 日报自动深读过的论文（默认排在第一的那篇），报告折叠在它的评论里，`/deep` 直接返回这份缓存。
 
 ## 反馈与记忆
 
@@ -66,8 +126,9 @@ cp config.example.yaml config.yaml        # 按需修改
 cp profile/interests.example.md profile/interests.md
 
 export LLM_API_KEY=sk-...                 # 可选：LLM_BASE_URL 覆盖配置中的 base_url
-uv run gleaner check --ping-llm           # 检查配置，并验证 API Key 与模型名
-uv run gleaner daily --dry-run            # 完整跑一遍：抓取、筛选、精排，打印结果但不发布
+uv run gleaner check --ping-llm           # 检查配置，并验证 API Key 与模型名；也列出推送渠道和 Zotero 的配置状态
+uv run gleaner daily --dry-run            # 完整跑一遍：抓取、筛选、精排、自动深读，打印结果但不发布、不推送
+uv run gleaner notify-test                # 给已启用的推送渠道各发一条测试消息；--channel feishu 只测一个
 
 uv run gleaner deep 2410.12345            # 本地深读，报告打印到终端（读取但不写入报告缓存）
 uv run gleaner deep 1 --day 2026-10-25    # 序号按某一天的日报解析，默认最近一份
@@ -94,6 +155,8 @@ gleaner/
 ├── llm/client.py            # OpenAI 兼容 LLM 客户端：模型分级、用量统计与预算、结构化输出
 ├── llm/prompt.py            # token 估算、不可信内容的包裹
 ├── notify/github_issue.py   # 发布日报 Issue、回复评论、添加和读取表情
+├── notify/                  # 邮件、飞书、企业微信推送（base.py 接口，dispatch.py 分发）
+├── redaction.py             # 密钥脱敏
 ├── pipelines/daily.py       # 每日推送流水线
 ├── pipelines/interact.py    # Issue 指令交互流水线
 ├── pipelines/feedback.py    # 日报第 0 步：同步 👍/👎 表情
@@ -103,6 +166,6 @@ gleaner/
 ├── ranking/                 # 嵌入、向量粗筛、LLM 精排、日报概览
 ├── reader/                  # 全文获取与章节切分、深读、对比
 ├── render/                  # 日报和指令回复的 Markdown 渲染与转义
-├── sources/                 # arXiv（RSS 与 API）、Semantic Scholar
+├── sources/                 # arXiv（RSS 与 API）、Semantic Scholar、Zotero
 └── store/data_branch.py     # gleaner-data 分支的读写与提交
 ```

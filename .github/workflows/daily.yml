@@ -3,17 +3,21 @@ name: Daily digest
 on:
   schedule:
     # arXiv 在美东时间周日至周四 20:00 公告，约为 UTC 周一至周五 00:00–01:00。
-    # 第二个时间点是兜底：GitHub 定时任务偶尔延迟或失败；当天 Issue 已存在时只补发缺失的评论。
+    # 第二个时间点是兜底：GitHub 定时任务偶尔延迟或失败；当天日报已发布时只补发缺失的评论和失败的推送渠道。
     - cron: "30 1 * * 1-5" # 北京时间 09:30
     - cron: "30 3 * * 1-5" # 北京时间 11:30（兜底）
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "只运行不发布（不创建 Issue、不提交数据分支；周末没有新公告时改用最近 20 篇论文）"
+        description: "只运行不发布（不创建 Issue、不推送、不提交数据分支；周末没有新公告时改用最近 20 篇论文）"
         type: boolean
         default: false
       force:
         description: "当天日报已存在时仍重新生成"
+        type: boolean
+        default: false
+      notify_test:
+        description: "只给已启用的推送渠道（邮件、飞书、企业微信）各发一条测试消息，不运行日报"
         type: boolean
         default: false
 
@@ -28,7 +32,11 @@ concurrency:
 jobs:
   digest:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 平时 3–5 分钟；自动深读（deep 档模型，单次超时 180 秒，失败会重试）和 Zotero 拉取可能再加十几分钟
+    timeout-minutes: 45
+    env:
+      # 只是「有没有配置 Zotero」的布尔值，不含密钥本身；决定是否恢复、保存 Zotero 缓存
+      ZOTERO_CONFIGURED: ${{ secrets.ZOTERO_KEY != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -39,9 +47,19 @@ jobs:
       - name: Cache embedding model
         uses: actions/cache@v4
         with:
-          path: ~/.cache/paper-gleaner
+          path: ~/.cache/paper-gleaner/models
           key: gleaner-models-${{ hashFiles('config.yaml', 'config.example.yaml') }}
           restore-keys: gleaner-models-
+
+      # Zotero 文库只缓存在这里，不写进 gleaner-data（公开分支谁都能看）。缓存命中后不会自动更新，
+      # 所以每次运行另存一份新的（key 带 run_id），恢复时取最近的一份；文库没变时 Zotero 返回 304 直接用它
+      - name: Restore Zotero cache
+        if: env.ZOTERO_CONFIGURED == 'true' && inputs.notify_test != true
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/paper-gleaner/zotero
+          key: gleaner-zotero-${{ github.run_id }}
+          restore-keys: gleaner-zotero-
 
       - name: Install dependencies
         run: uv sync --locked --no-dev
@@ -58,11 +76,34 @@ jobs:
           EMBEDDING_API_KEY: ${{ secrets.EMBEDDING_API_KEY }}
           LLM_FAST_MODEL: ${{ vars.LLM_FAST_MODEL }}
           LLM_DEEP_MODEL: ${{ vars.LLM_DEEP_MODEL }}
+          # 推送渠道：没有启用的渠道不会读取这些变量
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}
+          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
+          ZOTERO_ID: ${{ secrets.ZOTERO_ID }}
+          ZOTERO_KEY: ${{ secrets.ZOTERO_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
           DRY_RUN: ${{ inputs.dry_run }}
           FORCE: ${{ inputs.force }}
+          NOTIFY_TEST: ${{ inputs.notify_test }}
         run: |
+          if [ "$NOTIFY_TEST" = "true" ]; then
+            uv run --no-sync gleaner notify-test
+            exit
+          fi
           args=()
           if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
           if [ "$FORCE" = "true" ]; then args+=(--force); fi
           uv run --no-sync gleaner daily "${args[@]}"
+
+      - name: Save Zotero cache
+        if: always() && env.ZOTERO_CONFIGURED == 'true' && inputs.notify_test != true
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/paper-gleaner/zotero
+          key: gleaner-zotero-${{ github.run_id }}

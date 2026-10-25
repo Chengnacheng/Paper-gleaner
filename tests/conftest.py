@@ -251,3 +251,17 @@ def interact_services(
         llm_factory=lambda: LLMClient(LLMConfig(), client=fake),
     )
     return services, fake
+
+
+class FakeNotifier:
+    """代替邮件、飞书、企业微信渠道：记录发送的 digest；error 不为空时每次都抛出。"""
+
+    def __init__(self, name: str, error: Exception | None = None) -> None:
+        self.name = name
+        self.error = error
+        self.sent: list[tuple[Digest, bool]] = []
+
+    def send(self, digest: Digest, *, test: bool = False) -> None:
+        self.sent.append((digest, test))
+        if self.error is not None:
+            raise self.error
