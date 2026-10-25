@@ -39,6 +39,9 @@ _DESCRIPTION_RE = re.compile(
     re.DOTALL,
 )
 _REPLACE_TYPES = {"replace", "replace-cross"}
+# 关键词检索：arXiv API 的检索语法只认 ASCII 词，其余字符（中文、引号、括号、布尔运算符）都去掉
+_QUERY_TERM_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9\-]*")
+MAX_QUERY_TERMS = 12
 
 
 class RateLimiter:
@@ -88,6 +91,23 @@ class ArxivSource:
         params = {
             "search_query": " OR ".join(f"cat:{c}" for c in self.config.categories),
             "sortBy": "submittedDate",
+            "sortOrder": "descending",
+            "max_results": limit,
+        }
+        return parse_api(self._api(params))
+
+    def search(self, query: str, limit: int = 10) -> list[Paper]:
+        """按关键词检索 arXiv（各个词都要出现在标题、摘要等字段中），按相关度排序。
+
+        只取查询中的英文单词和数字，最多 MAX_QUERY_TERMS 个；一个都没有时返回空列表。
+        """
+        terms = _QUERY_TERM_RE.findall(query)[:MAX_QUERY_TERMS]
+        terms = [term for term in terms if term.upper() not in {"AND", "OR", "ANDNOT"}]
+        if not terms:
+            return []
+        params = {
+            "search_query": " AND ".join(f"all:{term}" for term in terms),
+            "sortBy": "relevance",
             "sortOrder": "descending",
             "max_results": limit,
         }

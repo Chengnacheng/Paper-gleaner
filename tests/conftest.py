@@ -14,9 +14,11 @@ import pytest
 from gleaner.agent import Services
 from gleaner.config import ArxivConfig, LLMConfig
 from gleaner.llm import LLMClient
-from gleaner.models import Digest, ScoredPaper
+from gleaner.models import DeepReport, Digest, Paper, ScoredPaper
+from gleaner.pipelines.daily import digest_path
+from gleaner.profile import command_feedback, record_feedback
 from gleaner.ranking.embedder import normalize
-from gleaner.reader import FulltextFetcher
+from gleaner.reader import FulltextFetcher, save_report
 from gleaner.sources import ArxivSource, SemanticScholar
 from gleaner.sources.arxiv import ARXIV_RATE_LIMITER, RateLimiter
 
@@ -251,3 +253,53 @@ def interact_services(
         llm_factory=lambda: LLMClient(LLMConfig(), client=fake),
     )
     return services, fake
+
+
+# --- Agent 工具、/ask、MCP -----------------------------------------------------
+
+OLDER_DAY = date(2026, 10, 20)
+CACHED_REPORT = "### 一句话总结\nRAG 的基准测试。\n\n### 实验\n在 5 个数据集上评测。"
+
+
+def seed_agent_data(store) -> None:
+    """两份日报、几条反馈、一个屏蔽主题、学到的偏好和一份深读报告缓存。"""
+    store.write_model(digest_path(DIGEST_DAY), interact_digest())
+    older = Digest(
+        day=OLDER_DAY,
+        generated_at=datetime(2026, 10, 20, 1, 30, tzinfo=UTC),
+        papers=[
+            ScoredPaper(
+                id="2610.00100",
+                title="Domain Generalization for Object Detectors",
+                abstract="Single-source domain generalization with style augmentation.",
+                llm_score=8,
+                reason="单源域泛化检测，和你的方向直接相关。",
+            )
+        ],
+        issue_number=0,
+    )
+    store.write_model(digest_path(OLDER_DAY), older)
+    now = datetime(2026, 10, 24, 12, 0, tzinfo=UTC)
+    liked = Paper(id="2610.00100", title=older.papers[0].title, abstract=older.papers[0].abstract)
+    other = Paper(id="2609.00900", title="Style Randomization", abstract="Random style transfer.")
+    record_feedback(
+        store,
+        [
+            command_feedback(liked, "like", now=now, note="有开源代码"),
+            command_feedback(other, "dislike", now=now),
+        ],
+        timezone="Asia/Shanghai",
+    )
+    store.append_jsonl("profile/muted.jsonl", [{"action": "mute", "topic": "医学影像"}])
+    store.write_text("profile/learned_preferences.md", "### 偏好\n- 偏好有开源代码的工作")
+    save_report(
+        store,
+        DeepReport(
+            paper_id="2610.00002",
+            title="RAG for Science",
+            model="deepseek-reasoner",
+            source="html",
+            generated_at=datetime(2026, 10, 25, 3, 0, tzinfo=UTC),
+            body=CACHED_REPORT,
+        ),
+    )
