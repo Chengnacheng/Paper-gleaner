@@ -222,6 +222,24 @@ def test_parse_html(html_text: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "notes",
+    [
+        '<span class="ltx_pubnotes"><span class="ltx_pubnote">Thanks: funding</span></span>',
+        '<span class="ltx_pubnote">Thanks: corresponding author</span>',
+        '<span class="ltx_pubnotes">Accepted for presentation</span>',
+        '<span class="ltx_pubnote">Thanks: author</span>'
+        '<span class="ltx_pubnote">Thanks: funding</span>',
+    ],
+)
+def test_parse_html_ignores_publication_notes_in_title(html_text: str, notes: str) -> None:
+    html = html_text.replace("</h1>", f"{notes}</h1>", 1)
+
+    assert parse_html(html).title == (
+        "LongKV: Hierarchical KV Cache Compression for Million-Token Inference"
+    )
+
+
+@pytest.mark.parametrize(
     "html",
     [
         "<html><body><p>No HTML for this paper.</p></body></html>",

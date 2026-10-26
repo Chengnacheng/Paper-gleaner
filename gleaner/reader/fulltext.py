@@ -304,6 +304,11 @@ def parse_html(html: str) -> FullText:
         raise FulltextError("页面中没有论文正文")
 
     title_node = article.css_first("h1.ltx_title_document")
+    if title_node is not None:
+        # LaTeXML 把致谢、通讯作者等出版说明嵌在标题里，提取标题前去掉。
+        # 先删除子节点，避免父节点删除后再访问已失效的嵌套节点。
+        for note in reversed(title_node.css(".ltx_pubnotes, .ltx_pubnote")):
+            note.decompose()
     title = _squash(title_node.text()) if title_node is not None else ""
     for heading in article.css("div.ltx_abstract h6.ltx_title"):
         heading.decompose()
