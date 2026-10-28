@@ -121,6 +121,12 @@ def test_extract_code_links() -> None:
     assert len(extract_code_links(many)) == MAX_LINKS
 
 
+def test_extract_code_links_repairs_pdf_line_wrap() -> None:
+    assert extract_code_links(["Code: https://github.com/GZHU-\nDVL/Dikai"]) == [
+        "https://github.com/GZHU-DVL/Dikai"
+    ]
+
+
 # --- 按优先级渲染 ---------------------------------------------------------------
 
 
@@ -281,7 +287,12 @@ def test_parse_pdf() -> None:
 
 def test_parse_pdf_links() -> None:
     pages = [
-        ["1 Introduction", "Code: https://github.com/example/longkv.", "2 Method", "Text."],
+        [
+            "1 Introduction",
+            "Code: https://github.com/GZHU-\nDVL/Dikai and https://github.com/example/longkv.",
+            "2 Method",
+            "Text.",
+        ],
         ["References", "[1] https://github.com/other/kvquant"],
     ]
     content = make_pdf(pages, links=("https://huggingface.co/datasets/example/pg19-long",))
@@ -290,8 +301,22 @@ def test_parse_pdf_links() -> None:
 
     assert fulltext.links == [
         "https://huggingface.co/datasets/example/pg19-long",
+        "https://github.com/GZHU-DVL/Dikai",
         "https://github.com/example/longkv",
     ]
+
+
+def test_parse_pdf_links_in_unrecognized_abstract_block() -> None:
+    pages = [
+        [
+            "Abstract: The code is available at https://github.com/GZHU-\nDVL/Dikai.",
+            "1 Introduction",
+            "Intro text.",
+        ],
+        ["2 Conclusion", "Conclusion."],
+        ["References", "[1] https://github.com/other/kvquant"],
+    ]
+    assert parse_pdf(make_pdf(pages)).links == ["https://github.com/GZHU-DVL/Dikai"]
 
 
 def test_parse_pdf_uses_metadata_abstract_and_split_heading() -> None:

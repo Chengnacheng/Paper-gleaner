@@ -95,6 +95,13 @@ _LINK_RE = re.compile(
     r"[^\s<>()\[\]{}\"'`|]+",
     re.IGNORECASE,
 )
+# PDF text extraction can wrap a repository URL across lines. Repair only known
+# code-hosting URLs so ordinary prose line breaks remain untouched.
+_WRAPPED_URL_RE = re.compile(
+    r"((?:https?://)?(?:www\.)?(?:github\.com|gitlab\.com|huggingface\.co)/"
+    r"[^\s<>()\[\]{}\"'`|]+)\r?\n(?=[\w.-]+(?:/|[?#]|$))",
+    re.IGNORECASE,
+)
 # 这些路径是站点页面而不是仓库
 _NOT_REPO = {
     "github.com": {"about", "collections", "explore", "features", "marketplace", "orgs", "topics"},
@@ -157,11 +164,21 @@ def extract_code_links(texts: Iterable[str]) -> list[str]:
     """从文本或链接地址中找出代码与资源链接，规范成仓库首页地址，按出现顺序去重。"""
     links: dict[str, str] = {}
     for text in texts:
+        text = _repair_wrapped_urls(text)
         for match in _LINK_RE.finditer(text):
             link = _normalize_link(match.group(0))
             if link is not None:
                 links.setdefault(link.lower(), link)
     return list(links.values())[:MAX_LINKS]
+
+
+def _repair_wrapped_urls(text: str) -> str:
+    """Join code-hosting URLs split across lines by PDF text extraction."""
+    while True:
+        repaired = _WRAPPED_URL_RE.sub(r"\1", text)
+        if repaired == text:
+            return text
+        text = repaired
 
 
 def _normalize_link(url: str) -> str | None:
@@ -403,7 +420,11 @@ def parse_pdf(content: bytes, *, abstract: str = "") -> FullText:
         sections.insert(0, Section("Abstract", abstract, "abstract"))
     # 参考文献所在页及之后的链接注释多半属于引用的其它工作，不算本文的代码
     annotations = [uri for page, uri in uris if references_page is None or page < references_page]
-    texts = [s.text for s in sections if s.kind != "skip"]
+    if references_page is None:
+        texts = [s.text for s in sections if s.kind != "skip"]
+    else:
+        # Abstract/title blocks may not become sections but can still contain the paper's links.
+        texts = [block.text for block in blocks if block.page < references_page]
     return FullText("pdf", sections, links=extract_code_links([*annotations, *texts]))
 
 
@@ -489,6 +510,7 @@ def _roman(numeral: str) -> int:
 
 def _join_lines(text: str) -> str:
     """合并 PDF 中被折行的句子，去掉行尾连字符。"""
+    text = _repair_wrapped_urls(text)
     text = re.sub(r"(\w)-\n(\w)", r"\1\2", text)
     return " ".join(text.split())
 

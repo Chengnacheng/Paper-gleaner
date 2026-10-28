@@ -182,6 +182,7 @@ def test_parse_api_skips_error_entries() -> None:
 @respx.mock
 def test_api_requests_are_spaced(api_bytes: bytes, monkeypatch: pytest.MonkeyPatch) -> None:
     sleeps: list[float] = []
+    monkeypatch.setattr("gleaner.sources.arxiv.time.monotonic", lambda: 0.0)
     monkeypatch.setattr("gleaner.sources.arxiv.time.sleep", sleeps.append)
     respx.get(API_URL).mock(return_value=httpx.Response(200, content=api_bytes))
     source = ArxivSource(ArxivConfig(), limiter=RateLimiter(3.0))
@@ -190,4 +191,4 @@ def test_api_requests_are_spaced(api_bytes: bytes, monkeypatch: pytest.MonkeyPat
     source.fetch_recent(20)
 
     assert len(sleeps) == 1  # 第一次请求不等待，之后与上一次至少间隔 3 秒
-    assert 2.5 < sleeps[0] <= 3.0
+    assert sleeps[0] == 3.0
