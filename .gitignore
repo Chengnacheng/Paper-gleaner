@@ -10,6 +10,9 @@ dist/
 .gleaner-data/
 .venv/
 .env
+# 上游只提供示例；在自己的 Fork 中可用 git add -f 提交这两个个性化文件。
+/config.yaml
+/profile/interests.md
 .pytest_cache/
 .ruff_cache/
 

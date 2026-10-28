@@ -8,7 +8,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
@@ -79,20 +79,18 @@ class GitHubClient:
         self._check(response, "创建标签")
 
     def list_issues(self, labels: list[str], *, state: str = "all") -> list[dict[str, Any]]:
-        response = self._request(
-            "GET",
+        items = self._paginate(
             f"/repos/{self.repository}/issues",
+            "查询 Issue",
             params={
                 "labels": ",".join(labels),
                 "state": state,
                 "sort": "created",
                 "direction": "desc",
-                "per_page": 100,
             },
         )
-        self._check(response, "查询 Issue")
         # 这个接口也会返回 Pull Request，需要排除
-        return [item for item in response.json() if "pull_request" not in item]
+        return [item for item in items if "pull_request" not in item]
 
     def create_issue(self, title: str, body: str, labels: list[str]) -> IssueRef:
         response = self._request(
@@ -137,12 +135,30 @@ class GitHubClient:
         )
         self._check(response, "关闭 Issue")
 
-    def _paginate(self, url: str, action: str) -> list[dict[str, Any]]:
+    def update_issue(
+        self, issue_number: int, *, body: str, state: Literal["open", "closed"]
+    ) -> None:
+        response = self._request(
+            "PATCH",
+            f"/repos/{self.repository}/issues/{issue_number}",
+            json={
+                "body": body,
+                "state": state,
+                "state_reason": "completed" if state == "closed" else "reopened",
+            },
+        )
+        self._check(response, "更新引导 Issue")
+
+    def _paginate(
+        self, url: str, action: str, *, params: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
         """按页读取列表接口，直到某一页不满 100 条。"""
         items: list[dict[str, Any]] = []
         page = 1
         while True:
-            response = self._request("GET", url, params={"per_page": 100, "page": page})
+            response = self._request(
+                "GET", url, params={**(params or {}), "per_page": 100, "page": page}
+            )
             batch = self._check(response, action).json()
             items.extend(batch)
             if len(batch) < 100:

@@ -8,6 +8,10 @@ on:
     - cron: "30 3 * * 1-5" # 北京时间 11:30（兜底）
   workflow_dispatch:
     inputs:
+      quickstart:
+        description: "首次运行：跳过自动深读、Zotero 和额外通知，先生成基础日报"
+        type: boolean
+        default: true
       dry_run:
         description: "只运行不发布（不创建 Issue、不推送、不提交数据分支；周末没有新公告时改用最近 20 篇论文）"
         type: boolean
@@ -91,12 +95,20 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run }}
           FORCE: ${{ inputs.force }}
           NOTIFY_TEST: ${{ inputs.notify_test }}
+          QUICKSTART: ${{ inputs.quickstart }}
         run: |
           if [ "$NOTIFY_TEST" = "true" ]; then
             uv run --no-sync gleaner notify-test
             exit
           fi
           args=()
+          setup_args=(--github)
+          if [ "$QUICKSTART" = "true" ]; then
+            args+=(--quickstart)
+            setup_args+=(--quickstart)
+          fi
+          if [ "$DRY_RUN" = "true" ]; then setup_args+=(--dry-run); fi
+          uv run --no-sync gleaner setup "${setup_args[@]}"
           if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
           if [ "$FORCE" = "true" ]; then args+=(--force); fi
           uv run --no-sync gleaner daily "${args[@]}"

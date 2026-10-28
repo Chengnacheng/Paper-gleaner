@@ -13,10 +13,42 @@
 
 ## 在 GitHub Actions 上使用
 
-1. 在仓库 Settings → Secrets and variables → Actions 中添加 Secret `LLM_API_KEY`；不用 DeepSeek 时再添加 `LLM_BASE_URL`（如 `https://dashscope.aliyuncs.com/compatible-mode/v1`），并在 `config.yaml` 或 Actions variables（`LLM_FAST_MODEL` / `LLM_DEEP_MODEL`）中改模型名；
-2. 把 `profile/interests.example.md` 复制为 `profile/interests.md`，用自然语言写下你的研究方向；
-3. 把 `config.example.yaml` 复制为 `config.yaml`，至少改一下要关注的 arXiv 分类；
-4. 在 Actions 页面打开 **Daily digest**，点 Run workflow 手动运行一次。可以先勾选 dry_run 试跑：只跑流程、不发 Issue；周末和节假日 arXiv 没有新公告时，试运行会改用最近提交的 20 篇论文，照样能检查大模型和嵌入模型是否配置正确。
+先看 [公开 Demo](https://github.com/stanGSA/Paper-gleaner-demo) 的[日报与深读示例](https://github.com/stanGSA/Paper-gleaner-demo/issues)。Demo 明确标注人工选取的历史论文，推荐理由和报告来自真实模型调用，不代表当天公告或推荐质量评测。
+
+1. **Fork** 本仓库。在自己的 Fork 中打开 Settings → General → Features，确认 **Issues** 已启用；打开 Actions，按页面提示启用 workflows。
+2. 在 Settings → Secrets and variables → Actions 添加 Secret **`LLM_API_KEY`**。默认使用 DeepSeek；若使用其他 OpenAI 兼容接口，再添加 Secret `LLM_BASE_URL`，并设置 Actions variables `LLM_FAST_MODEL` 和 `LLM_DEEP_MODEL`。模型名必须以服务商实际可用的名称为准。
+3. 在自己的 Fork 中，从 `profile/interests.example.md` 创建 **`profile/interests.md`**，写几句话说明研究方向、偏好和不关注的内容。可在 GitHub 网页中复制内容，通过 Add file 创建文件并提交。
+4. 从 `config.example.yaml` 创建 **`config.yaml`**，至少检查 arXiv 分类与模型名。密钥不要写进这两个文件。没有 `config.yaml` 时允许回退到示例配置，但仍必须提供兴趣描述。
+5. 打开 Actions → **Daily digest** → **Run workflow**，首次保留 **quickstart** 勾选、取消 **dry_run** 和 **notify_test**，然后运行。在运行页的 Summary 查看结果，成功后从链接打开日报 Issue。
+
+`quickstart` 只在本次运行跳过自动深读、Zotero 和邮件／飞书／企业微信，先生成基础日报，不修改配置文件。看到日报后，可评论 `/deep 1` 单独体验深读。以后手动运行时取消 quickstart，即使用完整配置；定时任务始终使用完整配置。
+
+缺少必要配置时，预检查会在加载嵌入模型和调用 LLM 前停止，并创建一条 **「👋 欢迎使用 Paper Gleaner」** 引导 Issue。重复运行更新同一条，补齐后自动关闭。Issues 不可用时，清单保留在 Actions Summary；未启用 Actions 时需要先完成第 1 步。可选渠道配置缺失会提示，不阻止基础日报。
+
+可以勾选 **dry_run** 先检查模型和流程：不创建任何 Issue、不推送、不提交数据分支。周末或节假日无新公告时，它会使用最近 20 篇论文试跑。**dry-run 成功不等于已收到日报**；正式运行无新公告或无论文达到阈值时不会发布，Summary 会说明原因。
+
+目标是新用户 10 分钟内收到首份日报；Actions 排队、首次下载模型和服务商响应会影响耗时。实测环境、计时边界及限制见[首次运行验收记录](docs/first-run.md)。
+
+![真实日报示例，候选为明确标注的历史论文](docs/screenshots/daily.jpg)
+
+![真实深读示例](docs/screenshots/deep.jpg)
+
+![配置缺失时自动创建的引导 Issue](docs/screenshots/setup.jpg)
+
+### 首次运行遇到问题
+
+| 现象 | 处理方法 |
+| --- | --- |
+| 缺少 Key、兴趣文件不存在或为空 | 按引导 Issue 补齐；只有注释也视为空文件，然后重新运行 |
+| 配置校验失败 | 检查 YAML 缩进、字段名；本地运行 `gleaner check` 获取具体错误；不要把密钥写入 YAML |
+| `401`、`model_not_found`、`503` | 检查 Key、完整 API 地址及服务商当前可用模型名；本地用 `gleaner check --ping-llm` 验证两档模型 |
+| 无法创建 Issue、`403` | 检查 Issues 已启用、Actions 的组织策略及 `contents: write` / `issues: write` 权限；查看 Summary |
+| 没有日报，但 workflow 成功 | 查看是否无新公告、无论文达到 `min_score`，或当天已发布；dry_run 本来就不发布 |
+| 冷启动慢或深读耗时长 | 首次勾选 quickstart；查看 Actions 各步骤耗时，再单独运行 `/deep` |
+
+本地的 `config.yaml` 和 `profile/interests.md` 默认被 Git 忽略，便于保留个人设置。要让自己的 Fork 的 Actions 使用它们，请明确执行 `git add -f config.yaml profile/interests.md` 并提交，或通过 GitHub 网页创建。公开 Fork 中的配置、兴趣和 `gleaner-data` 都可被访问，请只填写愿意公开的内容。`.env` 始终只留在本地；Actions 通过 Secrets 获取密钥。
+
+已有用户同步这次更新前，请备份自己已跟踪的这两个文件；上游此次移除的是文件跟踪。更新后还原个人内容，再在自己的 Fork 中明确提交。本地执行 `git rm --cached` 会保留工作区文件，但后续拉取删除提交的其他克隆需要自行备份。
 
 之后每个工作日北京时间 09:30 自动运行，日报发成带 `daily` 标签的 Issue，排在第一的论文会自动深读、报告折叠在它的评论里（`deep_read.auto_top_m`，设为 0 关闭）；还可以同时推送到[邮件、飞书、企业微信](#推送到邮件飞书企业微信)；每周日晚上 **Weekly preferences** 把一周的反馈总结成「学到的偏好」（见[反馈与记忆](#反馈与记忆)）。运行产生的数据（去重记录、兴趣拆解缓存、每日结果和统计、深读报告、反馈、屏蔽主题、学到的偏好）保存在 `gleaner-data` 分支，不会污染 `main`。
 
@@ -157,6 +189,8 @@ cp profile/interests.example.md profile/interests.md
 
 export LLM_API_KEY=sk-...                 # 可选：LLM_BASE_URL 覆盖配置中的 base_url
 uv run gleaner check --ping-llm           # 检查配置，并验证 API Key 与模型名；也列出推送渠道和 Zotero 的配置状态
+uv run gleaner setup                     # 离线预检查，输出配置引导清单；不会访问 GitHub 或调用模型
+uv run gleaner daily --dry-run --quickstart  # 首次试跑：跳过自动深读和可选集成
 uv run gleaner daily --dry-run            # 完整跑一遍：抓取、筛选、精排、自动深读，打印结果但不发布、不推送
 uv run gleaner notify-test                # 给已启用的推送渠道各发一条测试消息；--channel feishu 只测一个
 
@@ -182,6 +216,7 @@ gleaner/
 ├── cli.py                   # 命令行入口
 ├── mcp_server.py            # MCP Server（gleaner-mcp）
 ├── config.py                # 配置加载与校验
+├── onboarding.py            # 统一配置预检查、幂等欢迎 Issue、快速开始配置
 ├── models.py                # 数据模型
 ├── filters.py               # 去重与关键词过滤
 ├── agent/commands.py        # Issue 指令的解析与分发

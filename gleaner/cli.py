@@ -38,6 +38,13 @@ from gleaner.notify.base import (
     sample_digest,
 )
 from gleaner.notify.dispatch import build_notifiers, results_line, send_all
+from gleaner.onboarding import (
+    config_problems,
+    inspect_setup,
+    quickstart_config,
+    setup_body,
+    sync_setup_issue,
+)
 from gleaner.pipelines.daily import DailyResult, digest_path, run_daily
 from gleaner.pipelines.interact import (
     CommentEvent,
@@ -134,11 +141,13 @@ def check(
     typer.echo(f"✓ 配置文件：{path}")
 
     interests = config.profile.interests_file
-    if interests.is_file():
+    required_problems = {p.code: p for p in config_problems(config) if p.blocking}
+    if "interests" not in required_problems:
         typer.echo(f"✓ 兴趣描述：{interests}")
     else:
         typer.echo(
-            f"✗ 兴趣描述：找不到 {interests}，请从 profile/interests.example.md 复制一份并改写"
+            f"✗ 兴趣描述：{required_problems['interests'].message}，"
+            "请从 profile/interests.example.md 复制一份并改写"
         )
         problems += 1
 
@@ -173,6 +182,46 @@ def check(
                 typer.echo(f"✓ LLM {tier}（{model}）：可用")
 
     if problems:
+        raise typer.Exit(1)
+
+
+@app.command()
+def setup(
+    config_path: ConfigOption = None,
+    github: Annotated[bool, typer.Option("--github", help="同步 GitHub 配置引导 Issue")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="只检查，不访问或修改 GitHub")] = False,
+    quickstart: Annotated[
+        bool, typer.Option("--quickstart", help="仅检查首次运行所需配置")
+    ] = False,
+) -> None:
+    """离线预检查；可在 Actions 中创建、更新或关闭同一条配置引导 Issue。"""
+    report = inspect_setup(config_path, quickstart=quickstart)
+    body = setup_body(report)
+    typer.echo(body)
+    if github and not dry_run:
+        try:
+            issue = sync_setup_issue(_github_client(), report)
+            if issue is not None:
+                note = f"配置引导：{issue.url}"
+                typer.echo(note)
+                body += f"\n{note}\n"
+        except (ConfigError, GitHubError, httpx.HTTPError) as error:
+            # GitHub 的错误正文可能包含敏感输入，不在公开日志中回显。
+            status = (
+                f"（HTTP {error.status}）"
+                if isinstance(error, GitHubError) and error.status
+                else ""
+            )
+            note = (
+                f"⚠️ 无法同步配置引导 Issue{status}；请检查 Issues、GITHUB_TOKEN 和写入权限。"
+                "配置清单见上方及 Actions Summary。"
+            )
+            typer.echo(note, err=True)
+            body += f"\n{note}\n"
+    if summary_file := os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(summary_file, "a", encoding="utf-8") as stream:
+            stream.write(body)
+    if not report.ready:
         raise typer.Exit(1)
 
 
@@ -260,10 +309,20 @@ def daily(
         bool, typer.Option("--dry-run", help="完整运行，但不发布 Issue、不提交数据分支")
     ] = False,
     force: Annotated[bool, typer.Option("--force", help="当天日报已存在时仍重新生成")] = False,
+    quickstart: Annotated[
+        bool, typer.Option("--quickstart", help="首次运行：跳过自动深读、Zotero 和额外通知")
+    ] = False,
     data_dir: DataDirOption = DEFAULT_DATA_DIR,
 ) -> None:
     """运行每日推送流水线：抓取、筛选、精排，并发布到 GitHub Issue。"""
     _, config = _load(config_path)
+    if quickstart:
+        config = quickstart_config(config)
+        typer.echo("· 快速开始：跳过自动深读、Zotero 和额外通知；配置文件保持不变")
+    if problems := [p for p in config_problems(config) if p.blocking]:
+        for problem in problems:
+            typer.echo(f"✗ {problem.message}：{problem.remedy}", err=True)
+        raise typer.Exit(1)
     today = datetime.now(ZoneInfo(config.timezone)).date()
     branch = DataBranch(Path.cwd(), data_dir)
     try:

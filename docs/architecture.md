@@ -770,7 +770,7 @@ GitHub Actions：公开仓库使用标准 runner 免费；私有仓库每次运�
 | **Phase 2 交互与深读** ✅ 已实现 | `interact.yml` 与指令解析；`/deep`（HTML/PDF 获取、代码链接、报告缓存）；`/compare`（多篇对比、单篇与相关工作对比）；`/more`、`/help` | 在日报 Issue 下评论 `/deep 1`，3 分钟内收到报告 |
 | **Phase 3 反馈记忆** ✅ 已实现 | reaction 同步；`/like`、`/dislike`、`/mute`、`/unmute`；反馈锚点参与粗筛；`weekly.yml` 偏好总结 | 连续反馈一周后，`learned_preferences.md` 内容合理，推荐结果有可观察的变化 |
 | **Phase 4 多渠道与生态** ✅ 已实现 | 邮件、飞书、企业微信；日报自动深读；Zotero 可选输入；`/ask` Agent；MCP Server；Claude Code Skill | 各渠道都能收到推送；在 Claude Code 中可以查询当天推送 |
-| **Phase 5 打磨与传播** | 缺少配置时自动创建引导 Issue；完善 README 和截图；建立 Demo 仓库；用一小份人工标注集评估精排 precision@10，据此调整权重和 prompt | 新用户按 README 能在 10 分钟内跑通 |
+| **Phase 5 打磨与传播**（进行中） | 配置预检查与引导 Issue、快速开始、README 和公开 Demo 已接入；尚需人工标注集评估精排 precision@10，据此调整权重和 prompt | 新用户按 README 能在 10 分钟内跑通；计时证据见 `docs/first-run.md` |
 
 Phase 1 完成后项目就已经比现有方案好用（可解释的推荐 + 不依赖 Zotero）；Phase 2 带来最主要的差异化（交互式深读）。
 
@@ -929,9 +929,9 @@ Phase 4 分两步合并：先是推送渠道、日报自动深读和 Zotero，�
 2. 在 Settings → General 中启用 Issues（fork 默认关闭）；
 3. 在 Settings → Secrets and variables → Actions 中添加 `LLM_API_KEY`（可选 `LLM_BASE_URL`）；
 4. 把 `config.example.yaml` 复制为 `config.yaml`，把 `profile/interests.example.md` 复制为 `profile/interests.md`，用自然语言写一段研究方向；
-5. 在 Actions 页面启用 workflows（fork 默认禁用），手动运行一次 Daily，几分钟后收到第一份日报 Issue。
+5. 在 Actions 页面按提示启用 workflows，手动运行 Daily，首次勾选 `quickstart`，跳过自动深读、Zotero 和额外通知，先生成基础日报；定时任务仍使用完整配置。
 
-如果缺少必要配置，workflow 会自动创建一个「👋 欢迎使用 Paper Gleaner」Issue，列出尚未完成的步骤。
+`gleaner setup --github` 在模型加载前检查必要配置。缺少配置时，workflow 创建或更新同一条「👋 欢迎使用 Paper Gleaner」Issue；补齐后关闭。可选集成的问题只提示；Issues 或权限不可用时退回 Actions Summary。`dry_run` 不访问或修改 GitHub，`notify_test` 不运行日报预检查。没有 `config.yaml` 时仍允许回退到示例配置，兴趣描述必须存在且非空。上游不跟踪个人配置；本地文件默认忽略，用户可在自己的 Fork 用 `git add -f` 明确提交。
 
 `profile/interests.example.md` 示例：
 

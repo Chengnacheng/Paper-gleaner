@@ -132,6 +132,31 @@ def test_daily_dry_run(repo: Path, rss_bytes: bytes, git_remote: Path) -> None:
 
 
 @respx.mock
+def test_daily_quickstart_skips_optional_services(
+    repo: Path, rss_bytes: bytes, git_remote: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = REPO_CONFIG.replace("auto_top_m: 0", "auto_top_m: 1") + (
+        "profile:\n  zotero: {enabled: true}\nnotify:\n  email: {enabled: true}\n"
+    )
+    (repo / "config.yaml").write_text(original, encoding="utf-8")
+    respx.get(RSS_URL).mock(return_value=httpx.Response(200, content=rss_bytes))
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("quickstart must skip optional services")
+
+    monkeypatch.setattr(cli, "ZoteroLibrary", forbidden)
+    monkeypatch.setattr(cli, "build_notifiers", forbidden)
+    monkeypatch.setattr("gleaner.pipelines.daily.FulltextFetcher", forbidden)
+    result = runner.invoke(app, ["daily", "--dry-run", "--quickstart"])
+
+    assert result.exit_code == 0, result.output
+    assert "快速开始" in result.output
+    assert "[1] 9/10" in result.output
+    assert (repo / "config.yaml").read_text(encoding="utf-8") == original
+    assert not data_branch_exists(git_remote)
+
+
+@respx.mock
 def test_daily_publishes_issue_and_data(
     repo: Path,
     rss_bytes: bytes,
