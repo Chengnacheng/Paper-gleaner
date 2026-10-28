@@ -153,3 +153,102 @@ def test_rejects_embedding_api_key_in_file(tmp_path: Path) -> None:
     text = "ranking:\n  embedding:\n    api_key: sk-xxx\n"
     with pytest.raises(ConfigError, match="EMBEDDING_API_KEY"):
         load_config(write(tmp_path, text), env={})
+
+
+# --- 推送渠道与 Zotero 的密钥 ---------------------------------------------------
+
+CHANNEL_ENV = {
+    "SMTP_HOST": "smtp.qq.com",
+    "SMTP_PORT": "587",
+    "SMTP_USER": "me@qq.com",
+    "SMTP_PASSWORD": "auth-code-123",
+    "EMAIL_TO": "a@example.com, b@example.com；c@example.com",
+    "FEISHU_WEBHOOK": "https://open.feishu.cn/open-apis/bot/v2/hook/token-abc",
+    "FEISHU_SECRET": "sign-secret",
+    "WECOM_WEBHOOK": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=wecom-key",
+    "ZOTERO_ID": "1234567",
+    "ZOTERO_KEY": "zotero-key-xyz",
+}
+
+
+def test_channel_and_zotero_secrets_from_env(tmp_path: Path) -> None:
+    config = load_config(write(tmp_path, ""), env=CHANNEL_ENV)
+
+    email = config.notify.email
+    assert (email.smtp_host, email.smtp_port) == ("smtp.qq.com", 587)
+    assert email.smtp_user is not None and email.smtp_user.get_secret_value() == "me@qq.com"
+    assert email.smtp_password is not None
+    assert email.smtp_password.get_secret_value() == "auth-code-123"
+    assert email.to == ["a@example.com", "b@example.com", "c@example.com"]
+    feishu, wecom = config.notify.feishu, config.notify.wecom
+    assert feishu.webhook is not None and feishu.webhook.get_secret_value().endswith("token-abc")
+    assert feishu.secret is not None and feishu.secret.get_secret_value() == "sign-secret"
+    assert wecom.webhook is not None and wecom.webhook.get_secret_value().endswith("key=wecom-key")
+    zotero = config.profile.zotero
+    assert zotero.library_id is not None and zotero.library_id.get_secret_value() == "1234567"
+    assert zotero.api_key is not None and zotero.api_key.get_secret_value() == "zotero-key-xyz"
+
+
+def test_channel_secrets_are_not_serialized(tmp_path: Path) -> None:
+    config = load_config(write(tmp_path, ""), env=CHANNEL_ENV)
+    dumped = config.model_dump_json()
+    for value in CHANNEL_ENV.values():
+        if value not in {"smtp.qq.com", "587"}:
+            assert value.split(",")[0] not in dumped
+    assert "token-abc" not in repr(config)
+    assert "auth-code-123" not in repr(config)
+
+
+@pytest.mark.parametrize(
+    ("text", "env_name"),
+    [
+        ("notify:\n  email:\n    smtp_password: x\n", "SMTP_PASSWORD"),
+        ("notify:\n  email:\n    password: x\n", "SMTP_PASSWORD"),
+        ("notify:\n  email:\n    to: [a@b.c]\n", "EMAIL_TO"),
+        ("notify:\n  email:\n    smtp_host: smtp.qq.com\n", "SMTP_HOST"),
+        ("notify:\n  feishu:\n    webhook: https://x\n", "FEISHU_WEBHOOK"),
+        ("notify:\n  feishu:\n    secret: x\n", "FEISHU_SECRET"),
+        ("notify:\n  wecom:\n    webhook: https://x\n", "WECOM_WEBHOOK"),
+        ("profile:\n  zotero:\n    api_key: x\n", "ZOTERO_KEY"),
+        ("profile:\n  zotero:\n    key: x\n", "ZOTERO_KEY"),
+        ("profile:\n  zotero:\n    library_id: '1'\n", "ZOTERO_ID"),
+    ],
+)
+def test_rejects_channel_secrets_in_file(tmp_path: Path, text: str, env_name: str) -> None:
+    with pytest.raises(ConfigError, match=env_name) as info:
+        load_config(write(tmp_path, text), env={})
+    assert "https://x" not in str(info.value)
+
+
+def test_invalid_smtp_port(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="SMTP_PORT"):
+        load_config(write(tmp_path, ""), env={"SMTP_PORT": "smtp"})
+
+
+def test_invalid_email_to_does_not_echo_addresses(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="EMAIL_TO") as info:
+        load_config(write(tmp_path, ""), env={"EMAIL_TO": "a@example.com, not-an-address"})
+    assert "not-an-address" not in str(info.value)
+
+
+def test_channel_and_zotero_options(tmp_path: Path) -> None:
+    text = (
+        "notify:\n"
+        "  email: {enabled: true, subject_prefix: '[论文]'}\n"
+        "  wecom: {enabled: true, max_papers: 3}\n"
+        "profile:\n"
+        "  zotero:\n"
+        "    enabled: true\n"
+        "    library_type: group\n"
+        "    collections: [Detection, ABCD2345]\n"
+        "    include_subcollections: false\n"
+        "    max_items: 50\n"
+    )
+    config = load_config(write(tmp_path, text), env={})
+    assert config.notify.email.subject_prefix == "[论文]"
+    assert config.notify.wecom.max_papers == 3
+    zotero = config.profile.zotero
+    assert (zotero.library_type, zotero.collections) == ("group", ["Detection", "ABCD2345"])
+    assert (zotero.include_subcollections, zotero.max_items) == (False, 50)
+    with pytest.raises(ConfigError, match="library_type"):
+        load_config(write(tmp_path, "profile:\n  zotero:\n    library_type: team\n"), env={})

@@ -1,13 +1,14 @@
 name: Interact
 
-# 在日报 Issue 下评论 /deep、/compare、/more、/help 时触发。
+# 在日报 Issue 下评论 /deep、/compare、/more、/like、/dislike、/mute、/unmute、/ask、/help 时触发。
+# /ask 让 deep 档模型调用只读工具（查日报、读全文、检索 arXiv 和历史），最多 8 步，只读当前 Issue 的评论作为上下文。
 # issue_comment 事件总是使用默认分支上的这个文件。
 on:
   issue_comment:
     types: [created]
 
 permissions:
-  contents: write # 提交 gleaner-data 分支（报告缓存、隐式反馈）
+  contents: write # 提交 gleaner-data 分支（报告缓存、反馈、屏蔽主题）
   issues: write # 回复评论、添加表情
 
 # 不设置 concurrency 分组：同一分组只保留一个排队中的任务，连续发几条指令时中间的会被取消。
@@ -23,7 +24,9 @@ jobs:
       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
       contains(github.event.issue.labels.*.name, 'gleaner')
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # /deep、/compare 一般一两分钟；/ask 的循环超过 10 分钟就停止调用工具并作答，
+    # 但单次 deep 档调用最长 180 秒、SDK 还会重试，留足余量
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 

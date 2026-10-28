@@ -1,0 +1,50 @@
+name: Weekly preferences
+
+# 每周把近期反馈总结进 gleaner-data 分支上的 profile/learned_preferences.md（只改这一个文件），
+# 下一次日报的精排会参考它。没有新反馈时不调用 LLM。
+on:
+  schedule:
+    - cron: "30 12 * * 0" # 北京时间周日 20:30，赶在周一的日报之前
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "只打印总结结果，不提交数据分支"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write # 提交 gleaner-data 分支
+
+concurrency:
+  group: gleaner-weekly
+  cancel-in-progress: false
+
+jobs:
+  summarize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked --no-dev
+
+      - name: Configure git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Summarize preferences
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_FAST_MODEL: ${{ vars.LLM_FAST_MODEL }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          args=()
+          if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+          uv run --no-sync gleaner summarize-preferences "${args[@]}"

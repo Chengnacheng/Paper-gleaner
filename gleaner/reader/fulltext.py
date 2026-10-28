@@ -15,7 +15,6 @@ GitHub、GitLab、Hugging Face 链接，作为「代码与资源」的候选。
 from __future__ import annotations
 
 import logging
-import math
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -26,6 +25,9 @@ import httpx
 import pymupdf
 from selectolax.lexbor import LexborHTMLParser, LexborNode
 
+# token 估算与截断在 llm/prompt.py 中，这里保留原来的导入路径
+from gleaner.llm.prompt import TRUNCATION_MARK as TRUNCATION_MARK
+from gleaner.llm.prompt import estimate_tokens, truncate_to_tokens
 from gleaner.models import Paper
 from gleaner.sources.arxiv import ARXIV_RATE_LIMITER, USER_AGENT, RateLimiter
 
@@ -59,13 +61,8 @@ DEFAULT_PRIORITIES: Mapping[SectionKind, int] = {
     "appendix": 3,
 }
 
-# 没有分词器，按字符数估算 token：英文平均约 4 个字符一个 token，论文里的公式、数字和
-# 表格切得更碎，这里保守地按 3.5 个字符计；中日韩字符按每字 1 个 token 计（实际通常更少）
-CHARS_PER_TOKEN = 3.5
-_CJK_RE = re.compile(r"[⺀-鿿가-힯豈-﫿＀-￯]")
 # 预算太少的章节不值得只留一个开头
 MIN_SECTION_TOKENS = 80
-TRUNCATION_MARK = " …（以下截断）"
 
 # 按标题关键词判断章节类型，靠前的规则优先
 _KIND_KEYWORDS: list[tuple[SectionKind, tuple[str, ...]]] = [
@@ -154,33 +151,6 @@ class FullText:
                     chosen[i] = truncate_to_tokens(blocks[i], share - 1)
             break
         return "\n\n".join(chosen[i] for i in sorted(chosen))
-
-
-def estimate_tokens(text: str) -> int:
-    """估算文本的 token 数（估算方式见 CHARS_PER_TOKEN）。"""
-    cjk = len(_CJK_RE.findall(text))
-    return cjk + math.ceil((len(text) - cjk) / CHARS_PER_TOKEN)
-
-
-def truncate_to_tokens(text: str, max_tokens: int) -> str:
-    """截断到约 max_tokens 个 token，尽量断在空白处，并在末尾注明截断。"""
-    if estimate_tokens(text) <= max_tokens:
-        return text
-    budget = max(max_tokens - estimate_tokens(TRUNCATION_MARK), 0)
-    if not _CJK_RE.search(text):
-        cut = int(budget * CHARS_PER_TOKEN)
-    else:
-        cost, cut = 0.0, len(text)
-        for i, char in enumerate(text):
-            cost += 1 if _CJK_RE.match(char) else 1 / CHARS_PER_TOKEN
-            if cost > budget:
-                cut = i
-                break
-    head = text[:cut]
-    space = max(head.rfind(" "), head.rfind("\n"))
-    if space > len(head) * 0.8:  # 不截断单词，但也不为此丢掉太多内容
-        head = head[:space]
-    return head.rstrip() + TRUNCATION_MARK
 
 
 def extract_code_links(texts: Iterable[str]) -> list[str]:

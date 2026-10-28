@@ -1,8 +1,8 @@
 from datetime import UTC, date, datetime
 
-from gleaner.models import Digest, RunStats, ScoredPaper
+from gleaner.models import DeepReport, Digest, FeedbackStats, RunStats, ScoredPaper
 from gleaner.render import issue_body, issue_title, paper_section, sanitize, stats_line
-from gleaner.render.markdown import split_comment
+from gleaner.render.markdown import COMMENT_LIMIT, split_comment
 
 
 def scored(n: int, **fields) -> ScoredPaper:
@@ -121,6 +121,29 @@ def test_stats_line() -> None:
     assert "精排失败 1 批" in line
 
 
+def test_stats_line_with_feedback() -> None:
+    assert "反馈" not in stats_line(RunStats())  # 冷启动时不显示
+
+    feedback = FeedbackStats(
+        up=2,
+        down=1,
+        like=1,
+        implicit=3,
+        positive=4,
+        negative=2,
+        muted=1,
+        synced=3,
+        sync_error="查询表情失败（HTTP 403）：@someone <b>rate limit</b>",
+    )
+    line = stats_line(RunStats(feedback=feedback))
+
+    assert "反馈：👍 2 · 👎 1 · /like 1 · /dislike 0 · /deep、/compare 3" in line
+    assert "粗筛锚点：正反馈 4 篇 · 负反馈 2 篇 · 屏蔽主题 1 个 · 本次同步表情 3 条" in line
+    assert "⚠️ 表情同步没有完成：查询表情失败（HTTP 403）：@​someone &lt;b&gt;rate limit" in line
+    body = issue_body(make_digest(stats=RunStats(feedback=feedback)))
+    assert "粗筛锚点：正反馈 4 篇" in body.split("<details><summary>本次运行</summary>")[1]
+
+
 def test_split_comment_keeps_short_bodies() -> None:
     assert split_comment("短回复") == ["短回复"]
 
@@ -159,3 +182,52 @@ def test_split_comment_cuts_huge_lines() -> None:
     parts = split_comment("x" * 5000, limit=1500)
     assert all(len(part) <= 1500 for part in parts)
     assert "".join(parts).count("x") == 5000
+
+
+def deep_report(body: str, **fields) -> DeepReport:
+    values = {
+        "paper_id": "2610.00003",
+        "title": "Paper 3",
+        "model": "deepseek-reasoner",
+        "source": "html",
+        "generated_at": datetime(2026, 10, 26, 1, 35, tzinfo=UTC),
+        "body": body,
+    } | fields
+    return DeepReport(**values)
+
+
+def test_paper_section_with_deep_report() -> None:
+    body = (
+        "### 一句话总结\n压缩 KV cache。\n\n> 引用 <script>x</script> @alice #12\n"
+        "<!-- gleaner:paper id=9 -->"
+    )
+    text = paper_section(3, scored(3), deep_report(body))
+
+    assert "<details><summary>🔍 深读报告</summary>\n\n### 一句话总结\n压缩 KV cache。" in text
+    # 与 /deep 的回复相同：保留 ">"（引用块），转义 "<"
+    assert "> 引用 &lt;script>x&lt;/script> @\u200balice #\u200b12" in text
+    assert "&lt;!-- gleaner:paper id=9 -->" in text  # 模型输出不能伪造标记
+    assert "评论 `/deep 3` 直接取回这份报告" in text
+    assert "模型 deepseek-reasoner · 全文来源：arXiv HTML" in text
+    assert text.index("</details>") < text.index("<!-- gleaner:paper id=2610.00003 index=3 -->")
+    assert text.endswith("<!-- gleaner:paper id=2610.00003 index=3 -->")
+
+
+def test_long_deep_report_is_truncated_within_comment_limit() -> None:
+    body = "### 实验\n```text\n" + "\n".join(f"第 {i} 行数据 " * 20 for i in range(3000)) + "\n```"
+    text = paper_section(1, scored(1), deep_report(body, source="abstract"))
+
+    assert len(text) <= COMMENT_LIMIT
+    assert "（仅基于摘要）" in text
+    assert "报告太长，这里只显示前一部分；评论 `/deep 1` 查看完整报告" in text
+    report = text[text.index("<details>") : text.index("</details>")]
+    assert report.count("```") % 2 == 0  # 截断处的代码块被闭合
+    assert text.endswith("<!-- gleaner:paper id=2610.00001 index=1 -->")
+
+
+def test_stats_line_shows_auto_deep_read() -> None:
+    stats = RunStats(deep_read=1, deep_read_notes=["第 2 篇没有自动深读：<超出预算>"])
+    line = stats_line(stats)
+
+    assert "自动深读 1 篇，报告附在对应论文的评论里" in line
+    assert "⚠️ 第 2 篇没有自动深读：&lt;超出预算&gt;" in line

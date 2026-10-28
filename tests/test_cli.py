@@ -11,10 +11,11 @@ from typer.testing import CliRunner
 
 from gleaner import __version__, cli
 from gleaner.cli import _report, app
-from gleaner.llm import LLMClient
-from gleaner.models import Digest, ScoredPaper
+from gleaner.llm import LLMClient, LLMError
+from gleaner.models import Digest, Paper, ScoredPaper
 from gleaner.notify import IssueRef
 from gleaner.pipelines.daily import DailyResult, digest_path
+from gleaner.profile import command_feedback, record_feedback
 from gleaner.store import DataBranch
 from tests.conftest import (
     DEEP_REPORT,
@@ -33,6 +34,8 @@ runner = CliRunner()
 RSS_URL = "https://rss.arxiv.org/rss/cs.CL+cs.LG"
 API = "https://api.github.com/repos/o/r"
 SCORES = {"2610.00001": 9, "2610.00002": 7, "2610.00003": 4}
+# 自动深读会请求 arXiv 全文，CLI 测试中关掉（另有专门的测试）
+REPO_CONFIG = "sources:\n  arxiv:\n    categories: [cs.CL, cs.LG]\ndeep_read:\n  auto_top_m: 0\n"
 ENV_VARS = [
     "LLM_API_KEY",
     "LLM_BASE_URL",
@@ -43,10 +46,26 @@ ENV_VARS = [
     "OPENAI_BASE_URL",
     "GITHUB_TOKEN",
     "GITHUB_REPOSITORY",
+    "GITHUB_REPOSITORY_OWNER",
     "GITHUB_API_URL",
+    "GITHUB_SERVER_URL",
+    "GITHUB_ACTIONS",
     "GITHUB_STEP_SUMMARY",
     "GITHUB_EVENT_PATH",
     "S2_API_KEY",
+    "EMBEDDING_API_KEY",
+    "EMBEDDING_BASE_URL",
+    "SMTP_HOST",
+    "SMTP_PORT",
+    "SMTP_USER",
+    "SMTP_PASSWORD",
+    "EMAIL_TO",
+    "FEISHU_WEBHOOK",
+    "FEISHU_SECRET",
+    "WECOM_WEBHOOK",
+    "ZOTERO_ID",
+    "ZOTERO_KEY",
+    "GLEANER_ZOTERO_CACHE",
 ]
 
 
@@ -69,7 +88,7 @@ def repo(clone: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch, clean_en
     """以一个 git 仓库为工作目录，配置齐全，LLM 和嵌入模型换成假的。"""
     path = clone("repo")
     monkeypatch.chdir(path)
-    (path / "config.yaml").write_text("sources:\n  arxiv:\n    categories: [cs.CL, cs.LG]\n")
+    (path / "config.yaml").write_text(REPO_CONFIG)
     (path / "profile").mkdir()
     (path / "profile" / "interests.md").write_text("我研究长上下文推理。", encoding="utf-8")
     monkeypatch.setenv("LLM_API_KEY", "sk-test")
@@ -169,6 +188,359 @@ def test_daily_skips_when_already_published(
     assert not data_branch_exists(git_remote)
 
 
+def seed_data(clone: Callable[[str], Path], *digests: Digest) -> None:
+    """在远端的 gleaner-data 分支上放几份日报。"""
+    seed_repo = clone("data-seed")
+    seed = DataBranch(seed_repo, seed_repo / ".gleaner-data", backoff_seconds=0)
+    store = seed.checkout()
+    for digest in digests:
+        store.write_model(digest_path(digest.day), digest)
+    seed.commit_and_push("data: seed digests")
+
+
+def todays_digest(**fields) -> Digest:
+    """今天（按配置的时区）已发布的日报，评论都在。"""
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    comment_ids = {"2610.00001": 801, "2610.00002": 802}
+    return interact_digest(**({"day": today, "comment_ids": comment_ids} | fields))
+
+
+def reactions_json(*items: tuple[str, str]) -> list[dict]:
+    return [
+        {"id": i, "user": {"login": login, "type": "User"}, "content": content}
+        for i, (login, content) in enumerate(items, start=1)
+    ]
+
+
+@respx.mock
+def test_daily_dry_run_syncs_reactions_without_committing(
+    repo: Path,
+    clone: Callable[[str], Path],
+    rss_bytes: bytes,
+    git_remote: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed_data(clone, todays_digest())
+    github_env(monkeypatch)
+    monkeypatch.setenv("GITHUB_REPOSITORY_OWNER", "Owner")
+    before = git("rev-parse", "gleaner-data", cwd=git_remote)
+    respx.get(RSS_URL).mock(return_value=httpx.Response(200, content=rss_bytes))
+    first = respx.get(f"{API}/issues/comments/801/reactions").mock(
+        return_value=httpx.Response(200, json=reactions_json(("owner", "+1"), ("bob", "-1")))
+    )
+    respx.get(f"{API}/issues/comments/802/reactions").mock(
+        return_value=httpx.Response(200, json=reactions_json(("bob", "+1")))
+    )
+
+    result = runner.invoke(app, ["daily", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert first.called
+    assert "· 同步了 1 条表情反馈" in result.output
+    assert "[1] 9/10  2610.00001" in result.output
+    # 终端输出里有粗筛分数的分项和反馈统计，用来观察反馈是否生效
+    assert "    📊 粗筛 " in result.output
+    assert "+ 正反馈 " in result.output
+    assert "反馈：👍 1 · 👎 0" in result.output
+    assert "本次同步表情 1 条" in result.output
+    assert git("rev-parse", "gleaner-data", cwd=git_remote) == before  # dry-run 不写数据
+
+
+@respx.mock
+def test_daily_dry_run_warns_without_github_env(repo: Path, rss_bytes: bytes) -> None:
+    respx.get(RSS_URL).mock(return_value=httpx.Response(200, content=rss_bytes))
+
+    result = runner.invoke(app, ["daily", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output.startswith("! 没有 GITHUB_TOKEN 和 GITHUB_REPOSITORY，跳过表情同步")
+
+
+@respx.mock
+def test_daily_commits_synced_reactions_when_already_published(
+    repo: Path,
+    clone: Callable[[str], Path],
+    git_remote: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    digest = todays_digest(issue_number=4)
+    seed_data(clone, digest)
+    github_env(monkeypatch)  # 没有 GITHUB_REPOSITORY_OWNER 时从 GITHUB_REPOSITORY 取出 owner
+    existing = {
+        "number": 4,
+        "title": f"📚 Paper Gleaner · {digest.day.isoformat()} · 2 篇",
+        "html_url": "https://github.com/o/r/issues/4",
+        "created_at": f"{digest.day.isoformat()}T01:30:00Z",
+    }
+    respx.get(f"{API}/issues").mock(return_value=httpx.Response(200, json=[existing]))
+    respx.get(f"{API}/issues/comments/801/reactions").mock(
+        return_value=httpx.Response(200, json=reactions_json(("O", "-1")))
+    )
+    respx.get(f"{API}/issues/comments/802/reactions").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+
+    result = runner.invoke(app, ["daily"])
+
+    assert result.exit_code == 0, result.output
+    assert "今天的日报已经发布" in result.output
+    message = git("log", "-1", "--format=%s", "gleaner-data", cwd=git_remote)
+    assert message == f"data: sync reactions {digest.day.isoformat()}"
+    month = digest.day.strftime("%Y-%m")
+    saved = git("show", f"gleaner-data:feedback/{month}.jsonl", cwd=git_remote)
+    assert '"signal": "down"' in saved
+
+
+# --- 推送渠道 -------------------------------------------------------------------
+
+FEISHU = "https://open.feishu.cn/open-apis/bot/v2/hook/feishu-token-123"
+WECOM = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=wecom-key-456"
+CHANNELS_CONFIG = REPO_CONFIG + "notify:\n  feishu: {enabled: true}\n  wecom: {enabled: true}\n"
+
+
+def channel_env(path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (path / "config.yaml").write_text(CHANNELS_CONFIG)
+    monkeypatch.setenv("FEISHU_WEBHOOK", FEISHU)
+    monkeypatch.setenv("FEISHU_SECRET", "sign-secret")
+    monkeypatch.setenv("WECOM_WEBHOOK", WECOM)
+
+
+@respx.mock
+def test_notify_test_sends_to_enabled_channels(
+    workdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    channel_env(workdir, monkeypatch)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+    feishu = respx.post(FEISHU).mock(return_value=httpx.Response(200, json={"code": 0}))
+    wecom = respx.post(WECOM).mock(
+        return_value=httpx.Response(200, json={"errcode": 93000, "errmsg": "invalid webhook url"})
+    )
+
+    result = runner.invoke(app, ["notify-test"])
+
+    assert result.exit_code == 1, result.output
+    assert "✓ 飞书：测试消息已发送，请查收" in result.output
+    assert "✗ 企业微信：企业微信返回错误 93000：Webhook 地址无效" in result.output
+    card = json.loads(feishu.calls.last.request.content)["card"]
+    assert card["header"]["title"]["content"].startswith("【测试】📚 Paper Gleaner · ")
+    assert "https://github.com/o/r/issues?q=label%3Adaily" in json.dumps(card)
+    assert wecom.called
+    assert "feishu-token-123" not in result.output and "wecom-key-456" not in result.output
+
+    only = runner.invoke(app, ["notify-test", "--channel", "feishu"])
+    assert only.exit_code == 0, only.output
+    assert "企业微信" not in only.output
+
+
+def test_notify_test_reports_disabled_and_unknown_channels(workdir: Path) -> None:
+    result = runner.invoke(app, ["notify-test"])
+    assert result.exit_code == 1
+    assert "没有启用任何推送渠道" in result.output
+
+    result = runner.invoke(app, ["notify-test", "--channel", "email"])
+    assert result.exit_code == 1
+    assert "✗ 邮件没有启用：在 config.yaml 中设置 notify.email.enabled: true" in result.output
+
+    result = runner.invoke(app, ["notify-test", "--channel", "sms"])
+    assert result.exit_code == 1
+    assert "不认识的渠道：sms" in result.output
+
+
+def test_notify_test_reports_missing_secrets(workdir: Path) -> None:
+    (workdir / "config.yaml").write_text("notify:\n  feishu: {enabled: true}\n")
+
+    result = runner.invoke(app, ["notify-test"])
+
+    assert result.exit_code == 1
+    assert "✗ 飞书已启用但没有配置好，这次不发送：缺少环境变量 FEISHU_WEBHOOK" in result.output
+
+
+@respx.mock
+def test_daily_dry_run_does_not_notify(
+    repo: Path, rss_bytes: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    channel_env(repo, monkeypatch)
+    respx.get(RSS_URL).mock(return_value=httpx.Response(200, content=rss_bytes))
+    feishu = respx.post(FEISHU)
+    wecom = respx.post(WECOM)
+
+    result = runner.invoke(app, ["daily", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "[1] 9/10  2610.00001" in result.output
+    assert not feishu.called and not wecom.called
+    assert "推送：" not in result.output
+
+
+@respx.mock
+def test_daily_notifies_after_publishing(
+    repo: Path, rss_bytes: bytes, git_remote: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    channel_env(repo, monkeypatch)
+    github_env(monkeypatch)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    respx.get(RSS_URL).mock(return_value=httpx.Response(200, content=rss_bytes))
+    respx.get(f"{API}/issues").mock(return_value=httpx.Response(200, json=[]))
+    respx.post(f"{API}/labels").mock(return_value=httpx.Response(201, json={}))
+    respx.post(f"{API}/issues").mock(
+        return_value=httpx.Response(
+            201, json={"number": 5, "html_url": "https://github.com/o/r/issues/5"}
+        )
+    )
+    respx.post(f"{API}/issues/5/comments").mock(return_value=httpx.Response(201, json={"id": 1}))
+    feishu = respx.post(FEISHU).mock(return_value=httpx.Response(200, json={"code": 0}))
+    respx.post(WECOM).mock(side_effect=httpx.ConnectError(f"failed to connect {WECOM}"))
+
+    result = runner.invoke(app, ["daily"])
+
+    assert result.exit_code == 0, result.output
+    assert "✓ 已发布：https://github.com/o/r/issues/5" in result.output
+    assert "· 推送：飞书 ✓ · 企业微信 ✗" in result.output
+    assert "::warning::企业微信推送失败：请求企业微信机器人失败" in result.output
+    assert "wecom-key-456" not in result.output
+    card = json.loads(feishu.calls.last.request.content)["card"]
+    assert "https://github.com/o/r/issues/5" in json.dumps(card)
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+    saved = git("show", f"gleaner-data:history/digests/{today}.json", cwd=git_remote)
+    assert '"feishu": {\n      "status": "sent"' in saved
+    assert "wecom-key-456" not in saved
+
+
+# --- 反馈与偏好 -----------------------------------------------------------------
+
+PREFERENCES_REPLY = {
+    "markdown": "### 偏好\n- 偏好有开源代码的工作（1 次 /like 提到）",
+    "changes": ["新增一条"],
+}
+
+
+def seed_feedback(clone: Callable[[str], Path]) -> None:
+    """gleaner-data 上的反馈和屏蔽主题。"""
+    seed_repo = clone("data-seed")
+    seed = DataBranch(seed_repo, seed_repo / ".gleaner-data", backoff_seconds=0)
+    store = seed.checkout()
+    now = datetime.now(ZoneInfo("UTC"))
+    liked = Paper(id="2610.00001", title="LongKV", abstract="We compress the KV cache.")
+    disliked = Paper(id="2610.00002", title="RAG Bench", abstract="A benchmark.")
+    bare = Paper(id="2610.00003", title="2610.00003", abstract="")
+    record_feedback(
+        store,
+        [
+            command_feedback(liked, "like", now=now, note="有开源代码"),
+            command_feedback(disliked, "dislike", now=now, note="纯 benchmark"),
+            command_feedback(bare, "deep", now=now),
+        ],
+        timezone="Asia/Shanghai",
+    )
+    store.append_jsonl(
+        "profile/muted.jsonl",
+        [
+            {"action": "mute", "topic": "医学影像", "query": "Medical imaging."},
+            {"action": "mute", "topic": "语音"},
+        ],
+    )
+    seed.commit_and_push("data: seed feedback")
+
+
+def use_llm(monkeypatch: pytest.MonkeyPatch, handler) -> FakeOpenAI:
+    fake = FakeOpenAI(handler)
+    monkeypatch.setattr(cli, "LLMClient", lambda config: LLMClient(config, client=fake))
+    return fake
+
+
+def test_feedback_command(repo: Path, clone: Callable[[str], Path], git_remote: Path) -> None:
+    seed_feedback(clone)
+    before = git("rev-parse", "gleaner-data", cwd=git_remote)
+
+    result = runner.invoke(app, ["feedback", "--days", "7"])
+
+    assert result.exit_code == 0, result.output
+    output = result.output
+    assert "反馈（最近 7 天，时间衰减半衰期 90 天）：共 3 篇论文" in output
+    assert "正反馈（A2） 2 篇：" in output
+    assert "  +2.0  权重 1.00  2610.00001  LongKV\n        /like · 原因：有开源代码" in output
+    assert "/deep · 只有 ID，不参与粗筛" in output
+    assert "负反馈（A3） 1 篇：\n  -2.0  权重 1.00  2610.00002  RAG Bench" in output
+    assert "屏蔽主题 2 个：\n  医学影像 —— Medical imaging.\n  语音 —— （还没有英文描述" in output
+    assert "（还没有，运行 gleaner summarize-preferences" in output
+    assert git("rev-parse", "gleaner-data", cwd=git_remote) == before
+
+
+def test_summarize_preferences_commits(
+    repo: Path,
+    clone: Callable[[str], Path],
+    git_remote: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed_feedback(clone)
+    fake = use_llm(monkeypatch, lambda request: json.dumps(PREFERENCES_REPLY, ensure_ascii=False))
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+
+    result = runner.invoke(app, ["summarize-preferences"])
+
+    assert result.exit_code == 0, result.output
+    assert "✓ 已把 2 篇论文的新反馈总结进 profile/learned_preferences.md。" in result.output
+    assert "· 新增一条" in result.output
+    assert "- 偏好有开源代码的工作（1 次 /like 提到）" in result.output
+    assert "我研究长上下文推理。" in fake.requests[0]["messages"][-1]["content"]
+    saved = git("show", "gleaner-data:profile/learned_preferences.md", cwd=git_remote)
+    assert saved.endswith("- 偏好有开源代码的工作（1 次 /like 提到）")
+    assert git("log", "-1", "--format=%s", "gleaner-data", cwd=git_remote) == (
+        "data: update learned preferences"
+    )
+    assert "```markdown\n<!-- gleaner:preferences" in summary.read_text(encoding="utf-8")
+
+    again = runner.invoke(app, ["summarize-preferences"])
+    assert "上次总结之后没有新反馈，不调用 LLM" in again.output
+    assert len(fake.requests) == 1
+
+
+def test_summarize_preferences_dry_run(
+    repo: Path, clone: Callable[[str], Path], git_remote: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed_feedback(clone)
+    use_llm(monkeypatch, lambda request: json.dumps(PREFERENCES_REPLY, ensure_ascii=False))
+    before = git("rev-parse", "gleaner-data", cwd=git_remote)
+
+    result = runner.invoke(app, ["summarize-preferences", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "试运行：会把 2 篇论文的新反馈总结进 profile/learned_preferences.md，没有提交。" in (
+        result.output
+    )
+    assert git("rev-parse", "gleaner-data", cwd=git_remote) == before
+
+
+def test_summarize_preferences_without_feedback(repo: Path, monkeypatch) -> None:
+    fake = use_llm(monkeypatch, lambda request: "{}")
+
+    result = runner.invoke(app, ["summarize-preferences"])
+
+    assert result.exit_code == 0, result.output
+    assert "上次总结之后没有新反馈，不调用 LLM" in result.output
+    assert fake.requests == []
+
+
+def test_summarize_preferences_llm_failure(
+    repo: Path, clone: Callable[[str], Path], git_remote: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed_feedback(clone)
+
+    def boom(request):
+        raise LLMError("调用 deepseek-chat 失败：Request timed out.")
+
+    use_llm(monkeypatch, boom)
+    before = git("rev-parse", "gleaner-data", cwd=git_remote)
+
+    result = runner.invoke(app, ["summarize-preferences"])
+
+    assert result.exit_code == 1
+    assert "✗ 偏好总结失败，profile/learned_preferences.md 保持不变" in result.output
+    assert git("rev-parse", "gleaner-data", cwd=git_remote) == before
+
+
 def test_daily_requires_github_env(repo: Path) -> None:
     result = runner.invoke(app, ["daily"])
     assert result.exit_code == 1
@@ -258,6 +630,43 @@ def test_check_passes_when_complete(workdir: Path, monkeypatch: pytest.MonkeyPat
     assert "✓ 兴趣描述" in result.output
     assert "✓ LLM_API_KEY" in result.output
     assert "cs.CL, cs.LG" in result.output
+
+
+def test_check_reports_channels(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (workdir / "profile").mkdir()
+    (workdir / "profile" / "interests.md").write_text("长上下文推理", encoding="utf-8")
+    (workdir / "config.yaml").write_text(
+        "notify:\n  github_issue: {enabled: false}\n"
+        "  email: {enabled: true}\n  feishu: {enabled: true}\n"
+    )
+    monkeypatch.setenv("LLM_API_KEY", "sk-test")
+    webhook = "https://open.feishu.cn/open-apis/bot/v2/hook/token-abc"
+    monkeypatch.setenv("FEISHU_WEBHOOK", webhook)
+    monkeypatch.setenv("WECOM_WEBHOOK", "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=k1")
+    monkeypatch.setenv("SMTP_HOST", "smtp.qq.com")
+
+    result = runner.invoke(app, ["check"])
+
+    assert result.exit_code == 1, result.output
+    assert "· GitHub Issue：未启用（其它渠道照样推送" in result.output
+    assert "✗ 邮件：已启用，但缺少环境变量 SMTP_USER、SMTP_PASSWORD、EMAIL_TO" in result.output
+    assert "✓ 飞书：已设置 Webhook；未设置 FEISHU_SECRET" in result.output
+    assert "· 企业微信：未启用（相关 Secret 已设置，把 notify.wecom.enabled 改为 true" in (
+        result.output
+    )
+    assert "gleaner notify-test" in result.output
+    assert "token-abc" not in result.output and "k1" not in result.output
+
+    monkeypatch.setenv("SMTP_USER", "me@qq.com")
+    monkeypatch.setenv("SMTP_PASSWORD", "auth-code")
+    monkeypatch.setenv("EMAIL_TO", "a@example.com,b@example.com")
+    monkeypatch.setenv("FEISHU_SECRET", "sign")
+    result = runner.invoke(app, ["check"])
+
+    assert result.exit_code == 0, result.output
+    assert "✓ 邮件：SMTP smtp.qq.com:465（SSL），收件人 2 个" in result.output
+    assert "✓ 飞书：已设置 Webhook，已开启签名校验" in result.output
+    assert "me@qq.com" not in result.output and "a@example.com" not in result.output
 
 
 def test_falls_back_to_example_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -431,7 +840,175 @@ def test_local_compare(interact_repo: Path, html_text: str) -> None:
     assert "## ⚖️ 对比 · 2 篇论文" in result.output
 
 
+def test_local_ask(interact_repo: Path, git_remote: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request):
+        if "每一步只做一件事" in request["messages"][0]["content"]:
+            if len(request["messages"]) == 2:
+                return json.dumps({"action": "call_tool", "tool": "get_digest", "arguments": {}})
+            return json.dumps({"action": "answer"})
+        return "推荐先读 2610.00001。"
+
+    use_llm(monkeypatch, handler)
+    before = git("rev-parse", "gleaner-data", cwd=git_remote)
+
+    result = runner.invoke(app, ["ask", "今天先读哪篇？"])
+
+    assert result.exit_code == 0, result.output
+    assert "## 💬 /ask · `今天先读哪篇？`" in result.output
+    assert "推荐先读 2610.00001。" in result.output
+    assert "2 步（上限 8）" in result.output and "工具：get_digest" in result.output
+    assert git("rev-parse", "gleaner-data", cwd=git_remote) == before  # 不写数据
+
+
+def test_digest_command(repo: Path, clone: Callable[[str], Path], git_remote: Path) -> None:
+    older = interact_digest(day=date(2026, 10, 20), overview=None, others=[])
+    seed_data(clone, interact_digest(overview="今天以长上下文为主。"), older)
+    before = git("rev-parse", "gleaner-data", cwd=git_remote)
+
+    latest = runner.invoke(app, ["digest"])
+
+    assert latest.exit_code == 0, latest.output
+    output = latest.output
+    assert output.startswith("📚 2026-10-25 的日报 · 推荐 2 篇 · https://github.com/o/r/issues/1")
+    assert "今天以长上下文为主。" in output
+    assert "[1] 9/10  2610.00001  LongKV" in output
+    assert "    https://arxiv.org/abs/2610.00001" in output
+    assert "另有 3 篇候选没有推送，加 --all 查看。" in output
+    assert "Candidate 0" not in output
+
+    everything = runner.invoke(app, ["digest", "--all"])
+    assert "其余 3 篇打过分但没有推送的候选：" in everything.output
+    assert "[3] 5/10  2610.00010  Candidate 0" in everything.output
+    assert "    🎯 候选 0 的理由" in everything.output
+
+    older_day = runner.invoke(app, ["digest", "--day", "2026-10-20"])
+    assert older_day.output.startswith("📚 2026-10-20 的日报")
+    assert "加 --all" not in older_day.output
+
+    missing = runner.invoke(app, ["digest", "--day", "2026-10-01"])
+    assert missing.exit_code == 1
+    assert "没有 2026-10-01 的日报，最近一份是 2026-10-25" in missing.output
+    assert git("rev-parse", "gleaner-data", cwd=git_remote) == before
+
+
+def test_digest_marks_cached_reports_and_works_offline(
+    repo: Path, clone: Callable[[str], Path]
+) -> None:
+    seed_repo = clone("data-seed")
+    seed = DataBranch(seed_repo, seed_repo / ".gleaner-data", backoff_seconds=0)
+    store = seed.checkout()
+    store.write_model(digest_path(DIGEST_DAY), interact_digest())
+    store.write_text("reports/2610.00002.md", "---\npaper_id: 2610.00002\n---\n报告")
+    seed.commit_and_push("data: seed")
+
+    result = runner.invoke(app, ["digest"])
+    assert "    🔍 已有深读报告：gleaner deep 2610.00002 直接读取" in result.output
+
+    git("remote", "set-url", "origin", str(repo.parent / "gone.git"), cwd=repo)
+    offline = runner.invoke(app, ["digest"])
+    assert offline.exit_code == 0, offline.output
+    assert "! 同步 gleaner-data 失败，使用本地已有的数据" in offline.output
+    assert "📚 2026-10-25 的日报" in offline.output
+
+
+def test_digest_without_any_data(repo: Path) -> None:
+    result = runner.invoke(app, ["digest"])
+    assert result.exit_code == 1
+    assert "gleaner-data 上还没有日报" in result.output
+
+
 def test_local_deep_reports_bad_refs(interact_repo: Path) -> None:
     result = runner.invoke(app, ["deep", "9"])
     assert result.exit_code == 1
     assert "序号 9 超出范围" in result.output
+
+
+@respx.mock
+def test_daily_dry_run_auto_deep_reads_first_paper(
+    repo: Path, rss_bytes: bytes, html_text: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (repo / "config.yaml").write_text(REPO_CONFIG.replace("auto_top_m: 0", "auto_top_m: 1"))
+    base = pipeline_llm(SCORES)
+    use_llm(
+        monkeypatch,
+        lambda request: (
+            DEEP_REPORT if "深读报告" in request["messages"][0]["content"] else base(request)
+        ),
+    )
+    respx.get(RSS_URL).mock(return_value=httpx.Response(200, content=rss_bytes))
+    html = respx.get(HTML_URL).mock(return_value=httpx.Response(200, text=html_text))
+
+    result = runner.invoke(app, ["daily", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert html.called
+    assert "    🔍 已自动深读：报告附在评论里，并写入 reports/2610.00001.md" in result.output
+    assert "自动深读 1 篇，报告附在对应论文的评论里" in result.output
+    assert "LLM 调用 4 次" in result.output
+
+
+ZOTERO_API = "https://api.zotero.org/users/1234567"
+
+
+@respx.mock
+def test_daily_dry_run_with_zotero(
+    repo: Path, rss_bytes: bytes, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (repo / "config.yaml").write_text(
+        REPO_CONFIG + "profile:\n  zotero: {enabled: true, max_items: 2}\n"
+    )
+    monkeypatch.setenv("ZOTERO_ID", "1234567")
+    monkeypatch.setenv("ZOTERO_KEY", "zotero-key-xyz")
+    cache = tmp_path / "zotero-cache"
+    monkeypatch.setenv("GLEANER_ZOTERO_CACHE", str(cache))
+    items = [
+        {
+            "key": f"ITEM000{i}",
+            "version": 3,
+            "data": {
+                "key": f"ITEM000{i}",
+                "itemType": "journalArticle",
+                "title": f"My library paper on attention {i}",
+                "abstractNote": "Attention kernels.",
+                "collections": [],
+                "dateAdded": f"2026-10-0{i + 1}T00:00:00Z",
+            },
+        }
+        for i in range(3)
+    ]
+    headers = {"Total-Results": "3", "Last-Modified-Version": "42"}
+    respx.get(f"{ZOTERO_API}/items/top").mock(
+        return_value=httpx.Response(200, json=items, headers=headers)
+    )
+    respx.get(RSS_URL).mock(return_value=httpx.Response(200, content=rss_bytes))
+
+    result = runner.invoke(app, ["daily", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "Zotero：使用 2 / 3 篇" in result.output
+    assert "+ Zotero " in result.output
+    assert "My library paper" not in result.output
+    assert "zotero-key-xyz" not in result.output and "1234567" not in result.output
+    assert list(cache.glob("library-*.json"))
+    data = repo / ".gleaner-data"
+    for path in data.rglob("*"):
+        if path.is_file() and ".git" not in path.parts:
+            assert "My library paper" not in path.read_text(encoding="utf-8"), path
+
+
+def test_check_reports_zotero(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (workdir / "config.yaml").write_text(
+        "profile:\n  zotero:\n    enabled: true\n    library_type: group\n"
+        "    collections: [Detection]\n"
+    )
+    result = runner.invoke(app, ["check"])
+    assert "✗ Zotero：已启用，但缺少环境变量 ZOTERO_ID、ZOTERO_KEY" in result.output
+
+    monkeypatch.setenv("ZOTERO_ID", "7654321")
+    monkeypatch.setenv("ZOTERO_KEY", "zotero-key-xyz")
+    result = runner.invoke(app, ["check"])
+    assert (
+        "✓ Zotero：群组文库，范围：collection Detection（含子 collection），最多取 200 篇作为锚点"
+        in result.output
+    )
+    assert "7654321" not in result.output

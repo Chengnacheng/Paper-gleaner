@@ -5,14 +5,17 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import re
 import sys
-from datetime import datetime
+from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated
 from zoneinfo import ZoneInfo
 
 import httpx
 import typer
+from pydantic import ValidationError
 
 from gleaner import __version__
 from gleaner.agent import Command, CommandError, Context, Services, execute, latest_digest_day
@@ -24,9 +27,18 @@ from gleaner.config import (
     resolve_config_path,
 )
 from gleaner.llm import LLMClient, LLMError
-from gleaner.models import ScoredPaper
+from gleaner.models import Digest, ScoredPaper
 from gleaner.notify import GitHubClient, GitHubError, IssuePublisher
-from gleaner.pipelines.daily import DailyResult, run_daily
+from gleaner.notify.base import (
+    CHANNEL_LABELS,
+    CHANNELS,
+    DEFAULT_SMTP_PORT,
+    ChannelName,
+    missing_settings,
+    sample_digest,
+)
+from gleaner.notify.dispatch import build_notifiers, results_line, send_all
+from gleaner.pipelines.daily import DailyResult, digest_path, run_daily
 from gleaner.pipelines.interact import (
     CommentEvent,
     EventError,
@@ -35,13 +47,24 @@ from gleaner.pipelines.interact import (
     load_event,
     report_failure,
 )
-from gleaner.profile import ProfileError
+from gleaner.profile import (
+    LEARNED_PREFERENCES_PATH,
+    Memory,
+    PreferencesError,
+    ProfileError,
+    SummaryResult,
+    load_interests,
+    load_memory,
+    summarize_preferences,
+)
+from gleaner.profile.memory import FEEDBACK_LOOKBACK_MONTHS
 from gleaner.ranking import EmbeddingError, build_embedder
-from gleaner.reader import FulltextFetcher
-from gleaner.render import stats_line
+from gleaner.reader import FulltextFetcher, report_path
+from gleaner.render import sanitize, stats_line
 from gleaner.render.replies import code, short_error
 from gleaner.sources import ArxivSource, SemanticScholar, SourceError
-from gleaner.store import DataBranch, DataBranchError
+from gleaner.sources.zotero import ZoteroLibrary
+from gleaner.store import DataBranch, DataBranchError, DataStore
 
 app = typer.Typer(
     help="Paper Gleaner：fork 即用、零服务器的论文追踪 Agent。",
@@ -130,6 +153,12 @@ def check(
     models = config.llm.models
     typer.echo(f"· LLM：{config.llm.base_url}（fast={models.fast}，deep={models.deep}）")
     typer.echo(f"· arXiv 分类：{', '.join(config.sources.arxiv.categories)}")
+    channel_lines, channel_problems = _channel_status(config)
+    typer.echo("\n".join(channel_lines))
+    problems += channel_problems
+    zotero_line, zotero_problem = _zotero_status(config)
+    typer.echo(zotero_line)
+    problems += zotero_problem
 
     if ping_llm and config.llm.api_key is not None:
         client = LLMClient(config.llm)
@@ -145,6 +174,70 @@ def check(
 
     if problems:
         raise typer.Exit(1)
+
+
+def _channel_status(config: Config) -> tuple[list[str], int]:
+    """各推送渠道的配置状态（不发送消息，验证请用 gleaner notify-test）。"""
+    notify = config.notify
+    lines = [
+        "· GitHub Issue：已启用"
+        if notify.github_issue.enabled
+        else "· GitHub Issue：未启用（其它渠道照样推送，但不带 Issue 链接，也不能评论交互）"
+    ]
+    problems = 0
+    for channel in CHANNELS:
+        label = CHANNEL_LABELS[channel]
+        missing = missing_settings(notify, channel)
+        if not getattr(notify, channel).enabled:
+            configured = "（相关 Secret 已设置，" if not missing else ""
+            if configured:
+                configured += f"把 notify.{channel}.enabled 改为 true 即可启用）"
+            lines.append(f"· {label}：未启用{configured}")
+        elif missing:
+            lines.append(f"✗ {label}：已启用，但缺少环境变量 {'、'.join(missing)}（GitHub Secret）")
+            problems += 1
+        else:
+            lines.append(f"✓ {label}：{_channel_detail(config, channel)}")
+    if any(getattr(notify, channel).enabled for channel in CHANNELS):
+        lines.append("  运行 gleaner notify-test 给已启用的渠道各发一条测试消息")
+    return lines, problems
+
+
+def _zotero_status(config: Config) -> tuple[str, int]:
+    """Zotero 的配置状态（不请求 Zotero；collection 名称在运行日报时才解析）。"""
+    zotero = config.profile.zotero
+    missing = [
+        name
+        for name, value in (("ZOTERO_ID", zotero.library_id), ("ZOTERO_KEY", zotero.api_key))
+        if value is None
+    ]
+    if not zotero.enabled:
+        return "· Zotero：未启用", 0
+    if missing:
+        return f"✗ Zotero：已启用，但缺少环境变量 {'、'.join(missing)}（GitHub Secret）", 1
+    library = "群组文库" if zotero.library_type == "group" else "个人文库"
+    scope = "整个文库"
+    if zotero.collections:
+        scope = "collection " + "、".join(zotero.collections)
+        scope += "（含子 collection）" if zotero.include_subcollections else "（不含子 collection）"
+    return f"✓ Zotero：{library}，范围：{scope}，最多取 {zotero.max_items} 篇作为锚点", 0
+
+
+def _channel_detail(config: Config, channel: str) -> str:
+    notify = config.notify
+    if channel == "email":
+        email = notify.email
+        port = email.smtp_port or DEFAULT_SMTP_PORT
+        mode = "SSL" if port == 465 else "STARTTLS"
+        return f"SMTP {email.smtp_host}:{port}（{mode}），收件人 {len(email.to)} 个"
+    if channel == "feishu":
+        if notify.feishu.secret is None:
+            return (
+                "已设置 Webhook；未设置 FEISHU_SECRET，"
+                "建议在机器人的安全设置中开启「签名校验」并把密钥配置为 Secret"
+            )
+        return "已设置 Webhook，已开启签名校验"
+    return f"已设置 Webhook，每次最多发 {notify.wecom.max_papers} 篇"
 
 
 # 日报运行中可预期的失败：打印原因后以退出码 1 结束，不打印调用栈
@@ -175,6 +268,9 @@ def daily(
     branch = DataBranch(Path.cwd(), data_dir)
     try:
         publisher = None if dry_run else _build_publisher(config)
+        # dry-run 不推送：不创建渠道
+        notifiers, notify_problems = ([], []) if dry_run else build_notifiers(config.notify)
+        reactions, owner, skipped = _reaction_access(publisher)
         llm = LLMClient(config.llm)
         result = run_daily(
             config,
@@ -183,24 +279,91 @@ def daily(
             embedder=build_embedder(config),
             today=today,
             publisher=publisher,
+            reactions=reactions,
+            owner=owner,
+            notifiers=notifiers,
+            zotero=ZoteroLibrary(config.profile.zotero) if config.profile.zotero.enabled else None,
             force=force,
             sample_size=DRY_RUN_SAMPLE_SIZE if dry_run else None,
         )
-        if not dry_run and result.status not in {"already_published", "no_announcements"}:
-            branch.commit_and_push(f"data: daily digest {today.isoformat()}")
+        if not dry_run:
+            if result.status not in {"already_published", "no_announcements"}:
+                branch.commit_and_push(f"data: daily digest {today.isoformat()}")
+            elif result.sync.records:
+                branch.commit_and_push(f"data: sync reactions {today.isoformat()}")
     except _DAILY_ERRORS as e:
         typer.echo(f"✗ {e}", err=True)
         raise typer.Exit(1) from e
 
     missing = _missing_comments(result, config)
-    report = _report(result, missing)
+    warnings = ([skipped] if skipped else []) + notify_problems + result.warnings
+    report = _report(result, missing, warnings)
     typer.echo(report)
-    if missing and os.environ.get("GITHUB_ACTIONS") == "true":
+    if os.environ.get("GITHUB_ACTIONS") == "true":
         # 在 Actions 运行页面显示为黄色警告
-        typer.echo(f"::warning::{missing} 篇论文的评论没有发出去，{_REPAIR_HINT}")
+        if missing:
+            typer.echo(f"::warning::{missing} 篇论文的评论没有发出去，{_REPAIR_HINT}")
+        for warning in warnings:
+            typer.echo(f"::warning::{warning}")
     if summary_file := os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(summary_file, "a", encoding="utf-8") as f:
             f.write(f"## Paper Gleaner · {today.isoformat()}\n\n{report}\n")
+
+
+@app.command("notify-test")
+def notify_test(
+    channels: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--channel",
+            help="只测试这个渠道（email、feishu、wecom），可以写多次；默认测试全部已启用的渠道",
+        ),
+    ] = None,
+    config_path: ConfigOption = None,
+) -> None:
+    """给已启用的推送渠道（邮件、飞书、企业微信）各发一条测试消息，验证配置。"""
+    _, config = _load(config_path)
+    selected: list[ChannelName] | None = None
+    if channels:
+        unknown = [name for name in channels if name not in CHANNELS]
+        if unknown:
+            typer.echo(f"✗ 不认识的渠道：{'、'.join(unknown)}（可选 {'、'.join(CHANNELS)}）")
+            raise typer.Exit(1)
+        selected = [name for name in CHANNELS if name in channels]
+        disabled = [name for name in selected if not getattr(config.notify, name).enabled]
+        for name in disabled:
+            label = CHANNEL_LABELS[name]
+            typer.echo(f"✗ {label}没有启用：在 config.yaml 中设置 notify.{name}.enabled: true")
+        if disabled:
+            raise typer.Exit(1)
+    notifiers, problems = build_notifiers(config.notify, selected)
+    for problem in problems:
+        typer.echo(f"✗ {problem}")
+    if not notifiers and not problems:
+        typer.echo("✗ 没有启用任何推送渠道：在 config.yaml 的 notify 中启用 email、feishu 或 wecom")
+        raise typer.Exit(1)
+
+    today = datetime.now(ZoneInfo(config.timezone)).date()
+    results = send_all(
+        sample_digest(today, _issues_url()), notifiers, now=datetime.now(UTC), test=True
+    )
+    for name, outcome in results.items():
+        label = CHANNEL_LABELS[name]
+        if outcome.status == "sent":
+            typer.echo(f"✓ {label}：测试消息已发送，请查收")
+        else:
+            typer.echo(f"✗ {label}：{outcome.error}")
+    if problems or any(outcome.status == "failed" for outcome in results.values()):
+        raise typer.Exit(1)
+
+
+def _issues_url() -> str | None:
+    """测试消息里的「去 Issue 讨论」链接：在 Actions 中指向本仓库的日报列表。"""
+    repository = os.environ.get("GITHUB_REPOSITORY", "").strip()
+    if not repository:
+        return None
+    server = os.environ.get("GITHUB_SERVER_URL", "").strip() or "https://github.com"
+    return f"{server}/{repository}/issues?q=label%3Adaily"
 
 
 @app.command("handle-comment")
@@ -241,7 +404,7 @@ def handle_comment_command(
             config=config,
             replier=replier,
             branch=DataBranch(Path.cwd(), data_dir),
-            services=_services(config),
+            services=build_services(config),
             persist=not dry_run,
             pause_seconds=0 if dry_run else 1.0,
         )
@@ -253,6 +416,36 @@ def handle_comment_command(
             f.write(f"## Paper Gleaner · Issue {event.issue_number}\n\n{summary}\n")
     if result.status == "failed":
         raise typer.Exit(1)
+
+
+@app.command("digest")
+def digest_command(
+    day: Annotated[
+        datetime | None,
+        typer.Option("--day", formats=["%Y-%m-%d"], help="哪一天的日报，默认最近一份"),
+    ] = None,
+    show_all: Annotated[bool, typer.Option("--all", help="同时列出打过分但没有推送的候选")] = False,
+    config_path: ConfigOption = None,
+    data_dir: DataDirOption = DEFAULT_DATA_DIR,
+) -> None:
+    """打印某一天推送的论文（默认最近一份），读取 gleaner-data，不修改。"""
+    _load(config_path)
+    store = _read_data(data_dir)
+    target = day.date() if day else latest_digest_day(store)
+    if target is None:
+        typer.echo("✗ gleaner-data 上还没有日报", err=True)
+        raise typer.Exit(1)
+    try:
+        digest = store.read_model(digest_path(target), Digest)
+    except ValidationError as e:
+        typer.echo(f"✗ {digest_path(target)} 格式不正确：{e}", err=True)
+        raise typer.Exit(1) from e
+    if digest is None:
+        latest = latest_digest_day(store)
+        hint = f"，最近一份是 {latest.isoformat()}" if latest else ""
+        typer.echo(f"✗ 没有 {target.isoformat()} 的日报{hint}", err=True)
+        raise typer.Exit(1)
+    typer.echo(_format_digest(digest, store, show_all=show_all))
 
 
 @app.command("deep")
@@ -278,6 +471,119 @@ def compare_command(
     _run_local(Command("compare", tuple(refs)), config_path, data_dir, day)
 
 
+@app.command("ask")
+def ask_command(
+    question: Annotated[str, typer.Argument(help="问题，例如「今天哪篇的方法最适合我的检测器？」")],
+    day: DayOption = None,
+    config_path: ConfigOption = None,
+    data_dir: DataDirOption = DEFAULT_DATA_DIR,
+) -> None:
+    """在本地向 Agent 提问（同 /ask），回答打印到终端（不发评论、不写数据分支）。"""
+    _run_local(Command("ask", rest=question), config_path, data_dir, day)
+
+
+@app.command("summarize-preferences")
+def summarize_preferences_command(
+    config_path: ConfigOption = None,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="只打印更新后的内容，不提交数据分支")
+    ] = False,
+    data_dir: DataDirOption = DEFAULT_DATA_DIR,
+) -> None:
+    """把近期反馈增量总结进 gleaner-data 上的 learned_preferences.md（由 weekly.yml 调用）。"""
+    _, config = _load(config_path)
+    try:
+        interests = load_interests(config.profile.interests_file)
+    except ProfileError as e:
+        typer.echo(f"! {e}；这次总结不参考兴趣描述", err=True)
+        interests = None
+    branch = DataBranch(Path.cwd(), data_dir)
+    try:
+        result = summarize_preferences(
+            branch.checkout(),
+            llm_factory=lambda: LLMClient(config.llm),
+            interests=interests,
+            now=datetime.now(UTC),
+            timezone=config.timezone,
+            language=config.language,
+        )
+    except (LLMError, PreferencesError, DataBranchError) as e:
+        typer.echo(f"✗ 偏好总结失败，{LEARNED_PREFERENCES_PATH} 保持不变：{e}", err=True)
+        raise typer.Exit(1) from e
+
+    if result.status == "updated" and not dry_run:
+        try:
+            branch.commit_and_push("data: update learned preferences")
+        except DataBranchError as e:
+            # 只有 weekly 写这个文件；冲突通常是这期间有人在 gleaner-data 上手动改了它
+            typer.echo(
+                f"✗ {LEARNED_PREFERENCES_PATH} 没有提交：{e}\n"
+                "如果这期间你在 gleaner-data 上改过这个文件，你的修改已保留，"
+                "重新运行一次即可在它的基础上更新。",
+                err=True,
+            )
+            raise typer.Exit(1) from e
+
+    report = _summary_report(result, dry_run)
+    typer.echo(report)
+    if summary_file := os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(summary_file, "a", encoding="utf-8") as f:
+            f.write(f"## Paper Gleaner · 偏好总结\n\n{_summary_markdown(result, dry_run)}\n")
+
+
+@app.command("feedback")
+def feedback_command(
+    days: Annotated[
+        int | None, typer.Option("--days", min=1, help="只看最近 N 天里有变化的论文")
+    ] = None,
+    config_path: ConfigOption = None,
+    data_dir: DataDirOption = DEFAULT_DATA_DIR,
+) -> None:
+    """查看聚合后的反馈、当前屏蔽的主题和学到的偏好（读取 gleaner-data，不修改）。"""
+    _, config = _load(config_path)
+    now = datetime.now(UTC)
+    try:
+        store = DataBranch(Path.cwd(), data_dir).checkout()
+    except DataBranchError as e:
+        typer.echo(f"✗ {e}", err=True)
+        raise typer.Exit(1) from e
+    memory = load_memory(store, now.astimezone(ZoneInfo(config.timezone)).date())
+    typer.echo(_format_memory(memory, now, config.ranking.feedback_half_life_days, days))
+
+
+def _read_data(data_dir: Path) -> DataStore:
+    """同步 gleaner-data 后返回它的目录；同步失败但本地已有数据时用本地的，并给出提示。"""
+    branch = DataBranch(Path.cwd(), data_dir)
+    try:
+        return branch.checkout()
+    except DataBranchError as e:
+        if not (data_dir / ".git").exists():
+            typer.echo(f"✗ {e}", err=True)
+            raise typer.Exit(1) from e
+        typer.echo(f"! 同步 gleaner-data 失败，使用本地已有的数据：{e}", err=True)
+        return DataStore(data_dir)
+
+
+def _format_digest(digest: Digest, store: DataStore, *, show_all: bool) -> str:
+    title = f"📚 {digest.day.isoformat()} 的日报 · 推荐 {len(digest.papers)} 篇"
+    if digest.issue_url:
+        title += f" · {digest.issue_url}"
+    lines = [title]
+    if digest.overview:
+        lines.append(f"\n{digest.overview}")
+    for index, paper in enumerate(digest.papers, start=1):
+        lines += ["", _format_paper(index, paper), f"    {paper.url}"]
+        if store.read_text(report_path(paper.id)) is not None:
+            lines.append(f"    🔍 已有深读报告：gleaner deep {paper.id} 直接读取")
+    if digest.others and show_all:
+        lines.append(f"\n其余 {len(digest.others)} 篇打过分但没有推送的候选：")
+        for index, paper in enumerate(digest.others, start=len(digest.papers) + 1):
+            lines += ["", _format_paper(index, paper), f"    {paper.url}"]
+    elif digest.others:
+        lines.append(f"\n另有 {len(digest.others)} 篇候选没有推送，加 --all 查看。")
+    return "\n".join(lines)
+
+
 def _run_local(
     command: Command, config_path: Path | None, data_dir: Path, day: datetime | None
 ) -> None:
@@ -286,7 +592,7 @@ def _run_local(
         store = DataBranch(Path.cwd(), data_dir).checkout()
         ctx = Context(
             config,
-            _services(config),
+            build_services(config),
             store,
             day=day.date() if day else latest_digest_day(store),
             persist=False,
@@ -297,7 +603,8 @@ def _run_local(
         raise typer.Exit(1) from e
 
 
-def _services(config: Config) -> Services:
+def build_services(config: Config) -> Services:
+    """命令行和 MCP Server 使用的外部服务；S2_API_KEY 从环境变量读取。"""
     api_key = os.environ.get("S2_API_KEY", "").strip() or None
     return Services(
         arxiv=ArxivSource(config.sources.arxiv),
@@ -345,6 +652,28 @@ def _build_publisher(config: Config) -> IssuePublisher | None:
     return IssuePublisher(_github_client(), config.notify.github_issue)
 
 
+def _reaction_access(
+    publisher: IssuePublisher | None,
+) -> tuple[GitHubClient | None, str | None, str | None]:
+    """表情同步用的 GitHub 客户端和仓库所有者；无法同步时第三项是跳过的原因。
+
+    只统计仓库所有者的表情：优先取 GITHUB_REPOSITORY_OWNER，没有时（如本地运行）从
+    GITHUB_REPOSITORY 中取出 owner。
+    """
+    if publisher is not None:
+        github = publisher.github
+    else:
+        try:
+            github = _github_client()
+        except ConfigError:
+            return None, None, "没有 GITHUB_TOKEN 和 GITHUB_REPOSITORY，跳过表情同步"
+    owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
+    owner = owner or github.repository.partition("/")[0].strip()
+    if not owner:
+        return None, None, "无法确定仓库所有者（GITHUB_REPOSITORY_OWNER），跳过表情同步"
+    return github, owner, None
+
+
 def _github_client(repository: str = "") -> GitHubClient:
     token = os.environ.get("GITHUB_TOKEN", "").strip()
     repository = os.environ.get("GITHUB_REPOSITORY", "").strip() or repository
@@ -370,14 +699,31 @@ def _missing_comments(result: DailyResult, config: Config) -> int:
     return sum(1 for paper in digest.papers if paper.id not in digest.comment_ids)
 
 
-def _report(result: DailyResult, missing: int = 0) -> str:
+def _report(result: DailyResult, missing: int = 0, warnings: Sequence[str] = ()) -> str:
+    notes = "\n".join(f"! {warning}" for warning in warnings)
+    if result.sync.records:
+        notes = "\n".join(filter(None, [f"· 同步了 {result.sync.records} 条表情反馈", notes]))
+    body = _report_body(result, missing)
+    return f"{notes}\n{body}" if notes else body
+
+
+def _report_body(result: DailyResult, missing: int) -> str:
     warning = f"! 还有 {missing} 篇论文的评论没有发出去，{_REPAIR_HINT}。" if missing else ""
     url = result.existing.url if result.existing else ""
+    if not url and result.digest is not None:
+        url = result.digest.issue_url or ""
+    pushed = f"· {results_line(result.notified)}" if result.notified else ""
     if result.status == "already_published":
-        lines = [f"今天的日报已经发布：{url}", warning, "如需重新生成，请加 --force。"]
+        head = f"今天的日报已经发布：{url}" if url else "今天的日报已经推送过。"
+        lines = [head, warning, "如需重新生成，请加 --force。"]
         return "\n".join(line for line in lines if line)
     if result.status == "repaired":
-        return "\n".join(line for line in [f"✓ 已补发缺失的论文评论：{url}", warning] if line)
+        lines = []
+        if result.repaired_comments or not result.notified:
+            lines.append(f"✓ 已补发缺失的论文评论：{url}")
+        if result.notified:
+            lines.append(f"· 补发上次失败的渠道：{results_line(result.notified)}")
+        return "\n".join(line for line in [*lines, warning] if line)
     if result.status == "no_announcements":
         return "今天没有新公告（arXiv 周末和节假日不更新）。"
 
@@ -388,9 +734,11 @@ def _report(result: DailyResult, missing: int = 0) -> str:
         count = digest.stats.fetched
         lines.append(f"今天没有新公告，改用最近提交的 {count} 篇论文试运行（只用于检查配置）。")
     if result.status == "published":
-        lines.append(f"✓ 已发布：{digest.issue_url}")
-        if warning:
-            lines.append(warning)
+        if digest.issue_url:
+            lines.append(f"✓ 已发布：{digest.issue_url}")
+        else:
+            lines.append("✓ 已推送（没有启用 GitHub Issue）")
+        lines += [line for line in (pushed, warning) if line]
     elif result.status == "nothing_relevant":
         lines.append("今天没有达到 min_score 的论文，未发布日报。")
     if digest.stats.degraded:
@@ -399,6 +747,8 @@ def _report(result: DailyResult, missing: int = 0) -> str:
         lines.append(f"\n{digest.overview}")
     for index, paper in enumerate(digest.papers, start=1):
         lines.append("\n" + _format_paper(index, paper))
+        if paper.id in digest.deep_reads:
+            lines.append(f"    🔍 已自动深读：报告附在评论里，并写入 reports/{paper.id}.md")
     lines.append("\n" + stats_line(digest.stats).replace("<br>", ""))
     return "\n".join(lines).lstrip("\n")
 
@@ -410,4 +760,91 @@ def _format_paper(index: int, paper: ScoredPaper) -> str:
         lines.append(f"    🎯 {paper.reason}")
     if paper.tldr:
         lines.append(f"    📝 {paper.tldr}")
+    if breakdown := score_breakdown(paper):
+        lines.append(f"    📊 {breakdown}")
+    return "\n".join(lines)
+
+
+def score_breakdown(paper: ScoredPaper) -> str:
+    """粗筛分数的分项，如「粗筛 0.952 = 兴趣 0.850 + 正反馈 0.120 + Zotero 0.040 − 负向 0.058」。"""
+    if paper.coarse_score is None or paper.interest_score is None:
+        return ""
+    text = f"粗筛 {paper.coarse_score:.3f} = 兴趣 {paper.interest_score:.3f}"
+    if paper.positive_score is not None:
+        text += f" + 正反馈 {paper.positive_score:.3f}"
+    if paper.zotero_score is not None:
+        text += f" + Zotero {paper.zotero_score:.3f}"
+    if paper.negative_score is not None:
+        text += f" − 负向 {paper.negative_score:.3f}"
+    return text
+
+
+def _summary_report(result: SummaryResult, dry_run: bool) -> str:
+    lines = _summary_lines(result, dry_run)
+    if result.text is not None:
+        lines += ["", "-----", result.text.rstrip()]
+    return "\n".join(lines)
+
+
+def _summary_markdown(result: SummaryResult, dry_run: bool) -> str:
+    """写进 Actions 运行摘要：模型输出是外部内容，说明文字转义，正文放进代码块。"""
+    lines = [sanitize(line) for line in _summary_lines(result, dry_run)]
+    if result.text is not None:
+        fence = "`" * max([3, *(len(run) + 1 for run in re.findall(r"`+", result.text))])
+        lines += ["", f"{fence}markdown", result.text.rstrip(), fence]
+    return "\n".join(lines)
+
+
+def _summary_lines(result: SummaryResult, dry_run: bool) -> list[str]:
+    if result.status == "no_new_feedback":
+        if result.new_records:
+            return [
+                f"上次总结之后新增的 {result.new_records} 条反馈都已撤销或相互抵消，"
+                f"不调用 LLM，{LEARNED_PREFERENCES_PATH} 保持不变。"
+            ]
+        return [f"上次总结之后没有新反馈，不调用 LLM，{LEARNED_PREFERENCES_PATH} 保持不变。"]
+    verb = "试运行：会把" if dry_run else "✓ 已把"
+    line = f"{verb} {result.papers} 篇论文的新反馈总结进 {LEARNED_PREFERENCES_PATH}"
+    if result.omitted:
+        line += f"（另有 {result.omitted} 篇超出输入上限，没有放进 prompt）"
+    return [line + ("，没有提交。" if dry_run else "。"), *(f"· {c}" for c in result.changes)]
+
+
+def _format_memory(memory: Memory, now: datetime, half_life_days: float, days: int | None) -> str:
+    feedback = memory.feedback
+    if days is not None:
+        since = now - timedelta(days=days)
+        feedback = [item for item in feedback if item.updated_at and item.updated_at >= since]
+    window = f"最近 {days} 天" if days is not None else f"最近 {FEEDBACK_LOOKBACK_MONTHS} 个月"
+    lines = [f"反馈（{window}，时间衰减半衰期 {half_life_days} 天）：共 {len(feedback)} 篇论文"]
+    for title, items in (
+        ("正反馈（A2）", [item for item in feedback if item.total > 0]),
+        ("负反馈（A3）", [item for item in feedback if item.total < 0]),
+    ):
+        items.sort(key=lambda item: item.weight(now, half_life_days), reverse=True)
+        lines.append(f"\n{title} {len(items)} 篇：")
+        for item in items:
+            weight = item.weight(now, half_life_days)
+            paper_title = item.title if len(item.title) <= 70 else item.title[:70] + "…"
+            lines.append(f"  {item.total:+.1f}  权重 {weight:.2f}  {item.paper_id}  {paper_title}")
+            detail = "、".join(item.signals)
+            if item.notes:
+                detail += " · 原因：" + "；".join(item.notes)
+            if not item.has_text:
+                detail += " · 只有 ID，不参与粗筛"
+            lines.append(f"        {detail}")
+    neutral = [item.paper_id for item in feedback if item.total == 0]
+    if neutral:
+        lines.append(f"\n中性 {len(neutral)} 篇（表情已撤销或反馈相互抵消）：{'、'.join(neutral)}")
+
+    lines.append(f"\n屏蔽主题 {len(memory.muted)} 个：")
+    for topic in memory.muted:
+        query = topic.query or "（还没有英文描述，下次运行日报时生成）"
+        lines.append(f"  {topic.topic} —— {query}")
+
+    lines.append(f"\n学到的偏好（{LEARNED_PREFERENCES_PATH}）：")
+    if memory.preferences:
+        lines += [f"  {line}" if line else "" for line in memory.preferences.splitlines()]
+    else:
+        lines.append("  （还没有，运行 gleaner summarize-preferences 或等每周的 Weekly 生成）")
     return "\n".join(lines)
