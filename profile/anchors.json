@@ -1,0 +1,37 @@
+{
+  "source_hash": "c2d709d566cb1ee1b444d697ab2860a1a317e12fad021adc0866972858568a58",
+  "model": "gpt-6.1-sol",
+  "generated_at": "2026-10-28T12:41:57.775711Z",
+  "anchors": [
+    {
+      "name": "目标检测的单源域泛化",
+      "query": "We study single-domain generalization for object detection, training detectors on a single labeled source domain and evaluating on unseen target domains without access to target-domain data during training. Methods learn transferable object representations and reduce reliance on domain-specific appearance cues to improve detection under distribution shifts.",
+      "negative": false
+    },
+    {
+      "name": "风格迁移与图像转换驱动的跨域检测",
+      "query": "We investigate style transfer and image-to-image translation for domain-generalized object detection using only source-domain training data. Appearance-diverse synthetic training images simulate potential target-domain shifts while preserving detection annotations, improving detector generalization to unseen domains.",
+      "negative": false
+    },
+    {
+      "name": "风格增强与域随机化",
+      "query": "We develop style augmentation and domain randomization methods for object detection under unseen domain shifts. Randomizing texture, color, illumination, weather, or feature statistics expands source-domain diversity and encourages detectors to learn domain-invariant representations.",
+      "negative": false
+    },
+    {
+      "name": "外观变换中的语义与边界框保持",
+      "query": "We study content-preserving appearance transformations for domain-generalized object detection that maintain object identity, spatial geometry, and bounding-box annotation validity. Semantic consistency and spatial structure constraints prevent style transfer or image translation from distorting objects or introducing label noise.",
+      "negative": false
+    },
+    {
+      "name": "跨域增强中的小目标细节保护",
+      "query": "We investigate how style transfer and domain augmentation affect small-object detection under domain shift. Detail-preserving transformations and scale-aware consistency constraints retain fine structures, object boundaries, and local contrast to improve small-object recall on unseen target domains.",
+      "negative": false
+    },
+    {
+      "name": "真实跨域检测评测与泛化机制分析",
+      "query": "We evaluate domain-generalized object detectors on real-world cross-domain benchmarks, measuring transfer from a single source domain to unseen environments. Controlled ablations, representation analyses, and failure-case studies examine how appearance augmentation affects cross-domain robustness, localization errors, and category- or scale-dependent detection performance.",
+      "negative": false
+    }
+  ]
+}
