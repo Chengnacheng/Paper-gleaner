@@ -1,0 +1,40 @@
+{
+  "day": "2026-10-29",
+  "generated_at": "2026-10-29T02:17:57.478867Z",
+  "overview": null,
+  "papers": [],
+  "others": [],
+  "stats": {
+    "fetched": 366,
+    "duplicates": 366,
+    "excluded": 0,
+    "candidates": 0,
+    "selected": 0,
+    "failed_batches": 0,
+    "degraded": false,
+    "llm_calls": 0,
+    "prompt_tokens": 0,
+    "completion_tokens": 0,
+    "duration_seconds": 1.3,
+    "feedback": {
+      "up": 0,
+      "down": 0,
+      "like": 0,
+      "dislike": 0,
+      "implicit": 1,
+      "positive": 1,
+      "negative": 0,
+      "muted": 0,
+      "synced": 0,
+      "sync_error": null
+    },
+    "zotero": null,
+    "deep_read": 0,
+    "deep_read_notes": []
+  },
+  "issue_number": null,
+  "issue_url": null,
+  "comment_ids": {},
+  "notifications": {},
+  "deep_reads": []
+}
