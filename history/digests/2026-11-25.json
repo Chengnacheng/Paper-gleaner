@@ -1,0 +1,1781 @@
+{
+  "day": "2026-11-25",
+  "generated_at": "2026-11-25T10:12:50.668126Z",
+  "overview": "今天的论文主要集中在数据稀缺与跨域条件下的视觉感知，涵盖合成数据增强、基础模型监督、域适应，以及跟踪、姿态估计和真实图像去雾。值得注意的趋势是，研究越来越重视迁移收益的可靠性与适用边界：更强的骨干、更多合成数据或基础模型伪标签并不必然带来提升，特征对齐、监督质量和不确定性校准成为关键。建议先读 [1]，它通过六个数据集系统比较合成增强的分配、剂量与筛选，并指出常用图像质量指标难以稳定预测检测收益，对设计数据稀缺场景下的实验很有参考价值。",
+  "papers": [
+    {
+      "id": "2611.31515",
+      "title": "Synthetic Augmentation for Data-Scarce Object Detection: Allocation, Dose, and Filtering Across Six Datasets",
+      "abstract": "Robotic perception for capturing uncooperative orbital objects and inspecting variable industrial products must often operate with limited labelled imagery. We examine a modular synthetic-augmentation pipeline, evaluating generation planning and post-generation filtering as separate interventions, with computational cost as a design constraint. Across six object-detection datasets, FLUX.1-Fill with class-specific LoRA adaptation produced dataset-dependent dose effects; the validation-selected augmentation improved mAP@50:95 on four datasets and reduced it on two. Filtering did not yield consistent gains, and FID, KID, precision, recall, and LPIPS did not consistently track detector changes. The results do not establish that image quality alone identifies useful samples. They motivate standardised evaluation and inexpensive candidate-utility measures that could identify useful samples before detector retraining, reducing repeated training cost.",
+      "authors": [
+        "Jo\\~ao F\\'elix",
+        "Atabak Dehban",
+        "Rodrigo Ventura"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8497,
+      "coarse_match": "真实跨域检测评测与泛化机制分析",
+      "interest_score": 0.8199,
+      "positive_score": 0.0298,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 7,
+      "matched_interests": [
+        "风格迁移与图像转换驱动的跨域检测"
+      ],
+      "reason": "使用 FLUX.1-Fill 和类别专属 LoRA 为目标检测生成增强数据，系统比较增强剂量、筛选策略和计算成本，对图像生成驱动的检测增强很有参考价值。其负结果及图像质量指标与检测收益脱钩的发现尤其值得关注，但摘要未报告未知目标域上的跨域泛化评测。",
+      "tldr": "在六个检测数据集上评估合成增强的分配、剂量与筛选，发现验证集选定的增强在四个数据集提升、两个下降，且常用图像质量指标无法稳定预测检测收益。",
+      "tags": [
+        "synthetic-data",
+        "object-detection",
+        "augmentation",
+        "evaluation"
+      ]
+    },
+    {
+      "id": "2611.32542",
+      "title": "Align or Fail: The Hidden Gap in Cross-Domain Panoptic Segmentation",
+      "abstract": "Vision foundation backbones are often treated as drop-in upgrades for improving region proposals in open-vocabulary panoptic segmentation (OVPS). Yet, improvements in backbones often fail to translate well into downstream cross-domain performance. Using ODISE, a diffusion-based OVPS model with a CLIP-based recognition branch, as a testbed, we replace its diffusion visual extractor with DINOv2, ConvNeXt, or DINOv3, and find that backbone upgrades can introduce a grouping-recognition mismatch: an alignment gap between dense-region features and CLIP text embeddings. Across source and near-domain, the newer DINOv3 variant improves source-domain performance but collapses on several cross-domain targets, whereas other baselines, interestingly, show the opposite. Stage-wise diagnostics, linear probes, and region-text alignment analyses indicate that DINOv3 embeddings retain semantic information but are geometrically incompatible with CLIP. We test adaptations, including text-side adapters, conformal mask retention (CMR), and a lean 2.7M-parameter visual-side LoRA, and find that text-side adaptation is more sensitive to vocabulary overlap. CMR provides only limited and target-specific gains, indicating that retention alone cannot resolve the full cross-domain failure. To understand why ADE20K resists improvement across all interventions, we evaluate OVSeg, CAT-Seg, and MaskCLIP. This separates two failure axes: a recoverable visual-to-CLIP interface gap that visual-side LoRA largely repairs, and a vocabulary-boundary limitation shared by the evaluated CLIP-based recognition systems that requires different remedies.",
+      "authors": [
+        "Huy Hoang Nguyen",
+        "Oliver Zendel",
+        "Tobias Glueck",
+        "Minh Nhat Vu",
+        "Andreas Kugi"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8219,
+      "coarse_match": "真实跨域检测评测与泛化机制分析",
+      "interest_score": 0.7926,
+      "positive_score": 0.0293,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 7,
+      "matched_interests": [
+        "真实跨域检测评测与泛化机制分析"
+      ],
+      "reason": "通过阶段诊断、线性探针和区域—文本对齐分析，揭示骨干升级导致跨域性能崩溃的机制，并比较轻量适配与失败案例，契合对跨域鲁棒性机制的关注。不过任务是开放词汇全景分割，而非单源域泛化目标检测。",
+      "tldr": "论文发现全景分割中更强骨干可能因区域特征与 CLIP 文本空间不对齐而损害跨域性能，并分析不同适配策略的作用及局限。",
+      "tags": [
+        "cross-domain",
+        "panoptic-segmentation",
+        "feature-alignment",
+        "failure-analysis"
+      ]
+    },
+    {
+      "id": "2611.32500",
+      "title": "CalibTrack: Exploring Learned Heteroscedastic Covariance for Robust Multi-Camera Pedestrian Tracking",
+      "abstract": "Analytical multi-view multi-object tracking (MV-MOT) systems rely on measurement covariance estimates to guide association, fusion, and state estimation. These covariance estimates are typically heuristic, requiring hand-tuning to the specific deployment scenario. We investigate how learned heteroscedastic measurement covariance affects calibration and robustness in analytical multi-camera tracking. To support this analysis, we introduce CalibTrack, a detector-side predictor that replaces uniform measurement covariance with per-detection covariance. We evaluate CalibTrack on the WildTrack and MultiviewX pedestrian tracking datasets with multiple analytical tracker cores, including an identity-informed GM-PHD, JIPDA, and pruned delta-GLMB filter. We additionally evaluate robustness by simulating adverse weather conditions with stable diffusion, Gaussian noise, camera browning, and camera dropout. CalibTrack improves average adverse tracking performance over confidence-scaled covariance, while producing better calibrated predictions, indicating the value of heteroscedastic covariance within analytical tracking. Comparisons with stronger heuristic covariance methods show that the benefits of learned covariance remain bounded by the quality of available observations and the downstream tracker choice. Together, these findings provide a principled exploration of learned covariance estimation and its potential for uncertainty-aware analytical tracking.",
+      "authors": [
+        "Jack Roberts",
+        "Aditya Iyer",
+        "Nora Ayanian"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8034,
+      "coarse_match": "真实跨域检测评测与泛化机制分析",
+      "interest_score": 0.7742,
+      "positive_score": 0.0291,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 7,
+      "matched_interests": [
+        "风格增强与域随机化"
+      ],
+      "reason": "使用稳定扩散模拟恶劣天气，并结合噪声及相机故障评测多摄像头跟踪鲁棒性，贴近外观扰动下的真实视觉系统评测兴趣。论文还分析学习式协方差收益受观测质量和跟踪器选择限制，但没有直接研究检测器单源域泛化或以风格增强训练检测器。",
+      "tldr": "CalibTrack 为每次检测预测异方差测量协方差，在两个行人跟踪数据集和多种跟踪器上改善相对置信度缩放基线的恶劣条件平均表现与校准，并揭示其收益边界。",
+      "tags": [
+        "multi-camera-tracking",
+        "weather-corruption",
+        "uncertainty",
+        "robustness"
+      ]
+    },
+    {
+      "id": "2611.31604",
+      "title": "Adapt, Label, Distill: Foundation-Model Supervision for Efficient Object Detection",
+      "abstract": "Object detectors often transfer poorly to specialized domains, where box annotations are scarce and deployment requires compact, real-time models. Large vision foundation models can provide offline supervision, but their zero-shot predictions may be poorly aligned with the target domain. We present an adapt-label-distill pipeline that uses limited target annotations to specialize a foundation teacher and transfer its supervision to compact detectors. We adapt SAM3 on the labeled subset, generate pseudo-labels for the remaining unlabeled images, and train YOLOv11 students with confidence-guided supervision. Teacher confidence weights pseudo-label losses, while zero-gating retains uncertain hypotheses during assignment without applying their associated training losses. Experiments across six target domains and three student capacities show substantial gains in several domains, while revealing limited or negative transfer in others. Teacher comparisons under a common hard-label training recipe support the choice of SAM3, and comparisons with an EfficientTeacher adaptation provide additional evidence against an online SSOD baseline. With YOLOv11m, our pipeline improves over STAC-style self-training by up to 15.3 AP and reaches 51.6 AP on Garbage, compared with 54.1 under full supervision. On NVIDIA Jetson AGX Orin, the deployed student achieves 188 FPS versus 2.9 FPS for SAM3, benefiting from foundation-model supervision without incurring the teacher's deployment cost. Code is available at https://github.com/zk2172-columbia/ProjectAdaptLabelDistill_ObjectDetection.",
+      "authors": [
+        "Zhengye Yang",
+        "Anthony Wang",
+        "Yuyang Li",
+        "Mehmet Kerem Turkcan",
+        "Beizhan Yan",
+        "Zoran Kostic"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8862,
+      "coarse_match": "目标检测的单源域泛化",
+      "interest_score": 0.8561,
+      "positive_score": 0.0302,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 6,
+      "matched_interests": [
+        "真实跨域检测评测与泛化机制分析"
+      ],
+      "reason": "研究专门领域中的检测迁移，在六个目标域比较效果并报告有限或负迁移，能为检测器跨域失效分析提供参考。但方法需要目标域标注及未标注图像，不属于仅用单源域数据的未知域泛化。",
+      "tldr": "通过少量目标域标注适配 SAM3、生成伪标签并蒸馏至 YOLOv11，在部分领域显著提升检测精度，同时保留学生模型的实时推理能力，但部分领域存在负迁移。",
+      "tags": [
+        "object-detection",
+        "domain-adaptation",
+        "pseudo-labeling",
+        "distillation"
+      ]
+    },
+    {
+      "id": "2611.32846",
+      "title": "DOPER: Deep Object Pose Estimation Revisited",
+      "abstract": "We present DOPER, an RGB pose estimation framework that shares a visual backbone across object detection, segmentation, and keypoint prediction to recover the 6D pose of known objects through Perspective-n-Point. Starting from synthetic training, DOPER adapts to real observations using partial supervision while retaining synthetic keypoint labels. Calibrated multi-view observations provide geometric constraints for keypoint supervision. During inference, optional heatmap refinement fits a rigid pose directly to the predicted keypoint distributions, resolving ambiguous correspondences without depth input or a learned pose refiner. Starting from underspecified CAD models, DOPER progressively refines the object representation and pose estimator. Results on SPEED+ and SHIRT further demonstrate effective adaptation to illumination changes and accurate temporal pose estimation. Across the evaluated single-view and multi-view configurations, DOPER achieves state-of-the-art detection AP results on HANDAL, HOPEv2, HOT3D, and T-LESS while using only RGB and running in real time (35 Hz per object model on one GB300). These results demonstrate the effectiveness of jointly learning detection and pose keypoints, with real observations and geometric constraints.",
+      "authors": [
+        "Hugo Hadfield",
+        "Alperen Degirmenci",
+        "Jonathan Tremblay"
+      ],
+      "categories": [
+        "cs.CV",
+        "cs.RO"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8102,
+      "coarse_match": "真实跨域检测评测与泛化机制分析",
+      "interest_score": 0.781,
+      "positive_score": 0.0292,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 6,
+      "matched_interests": [
+        "真实跨域检测评测与泛化机制分析"
+      ],
+      "reason": "联合目标检测与姿态关键点学习，研究合成到真实迁移及光照变化，并报告多个真实基准的检测 AP，具有明确交集。但方法使用真实观测的部分监督进行适配，不属于仅用单源域数据面向未知域的泛化。",
+      "tldr": "DOPER 共享检测、分割与关键点骨干，通过真实观测和多视几何约束适配合成训练模型，在多个物体基准获得领先检测 AP 并实现实时 RGB 姿态估计。",
+      "tags": [
+        "pose-estimation",
+        "object-detection",
+        "sim-to-real",
+        "domain-adaptation"
+      ]
+    },
+    {
+      "id": "2611.32474",
+      "title": "Progressive Reliable Supervision for Black-Box Universal Domain Adaptation",
+      "abstract": "Black-Box Universal Domain Adaptation (B$^2$-UniDA) aims to adapt a target model to an unlabeled target domain under arbitrary label-space relationships, while neither source data nor source-model parameters are accessible during adaptation. Under such restrictive information access, reliable target supervision is unavailable, while predictions from the black-box source model can be unreliable due to source bias and domain shifts. To address this challenge, we propose Progressive Reliable Supervision (PReS), which progressively establishes and refines reliable target supervision by coordinating complementary knowledge from the black-box source model, foundation models, and the evolving target model. PReS first identifies reliable known samples by exploiting semantic consistency under diffusion-based perturbations and cross-model consensus between the black-box source model and CLIP. It then estimates the sample-wise reliability of the two predictors and adaptively integrates their complementary predictions to construct reliable pseudo labels. The resulting supervision is exploited asymmetrically to encourage confident and discriminative predictions for reliable known samples while maintaining uncertain yet locally consistent predictions for potential unknown samples. As adaptation proceeds, the emerging target-domain knowledge is further leveraged to refine both the pseudo labels and the known/unknown sample partition, forming a closed-loop process in which supervision construction and target adaptation mutually reinforce each other. Extensive experiments on multiple benchmark datasets under diverse label-space relationships demonstrate that PReS achieves state-of-the-art or highly competitive performance under the restrictive B$^2$-UniDA setting.",
+      "authors": [
+        "Jing Li",
+        "Zhe Zhang",
+        "Huateng Sun",
+        "Yuhui Yang",
+        "Wanli Xue",
+        "Xu Cheng",
+        "Fan Shi",
+        "Jianhua Zhang",
+        "Qinghua Hu",
+        "Shengyong Chen"
+      ],
+      "categories": [
+        "cs.CV",
+        "cs.AI"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8034,
+      "coarse_match": "目标检测的单源域泛化",
+      "interest_score": 0.7727,
+      "positive_score": 0.0308,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 6,
+      "matched_interests": [
+        "风格增强与域随机化"
+      ],
+      "reason": "利用扩散扰动下的语义一致性和跨模型共识筛选可靠监督，对域偏移下的增强一致性与鲁棒伪标签构建有直接参考价值。其设定需要无标签目标域进行适应，并非面向未知目标域的单源检测泛化，摘要也未报告检测实验。",
+      "tldr": "PReS 在黑盒通用域适应中融合源模型、CLIP 与逐步更新的目标模型，通过扩散扰动一致性和可靠性估计迭代优化伪标签及已知／未知样本划分。",
+      "tags": [
+        "domain-adaptation",
+        "diffusion-perturbation",
+        "pseudo-labeling"
+      ]
+    },
+    {
+      "id": "2611.32632",
+      "title": "HazeFlux: Few-Step Generative Priors for Real-World Image Dehazing",
+      "abstract": "Real-world single-image dehazing suffers from severe domain shifts, as paired real data is scarce and models trained on synthetic haze generalize poorly to real-world haze. While pre-trained generative editing models offer powerful image priors to bridge this generalization gap, applying them to image dehazing poses two major challenges: standard generative models prioritize distribution alignment over strict pixel-level fidelity, and operating in compressed latent spaces inherently discards fine-grained structural details. In this paper, we propose a novel two-stage framework that adapts the generative prior of a few-step flow-matching backbone to real-world dehazing. In the first stage, we fine-tune the latent backbone using Low-Rank Adaptation (LoRA), supervised not only on a flow-matching objective, but also on pixel-level supervision, thus enabling direct hazy-to-clear translation. In the second stage, we introduce structure-preserving skip connections directly to the VAE decoder, bypassing latent compression artifacts to recover precise spatial edges. Experiments on four realworld benchmarks demonstrate that our approach significantly outperforms existing dehazing methods in real conditions.",
+      "authors": [
+        "Yunong Liu",
+        "Danna Xue",
+        "Javier Vazquez-Corral"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8019,
+      "coarse_match": "风格迁移与图像转换驱动的跨域检测",
+      "interest_score": 0.7703,
+      "positive_score": 0.0316,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 6,
+      "matched_interests": [
+        "外观变换中的语义与边界框保持"
+      ],
+      "reason": "通过像素监督和 VAE 解码器的结构保持跳连，缓解生成式图像转换中的边缘与细节丢失，可为保持检测标注有效性的外观变换提供方法参考。论文处理合成到真实的去雾泛化，但未报告检测性能、边界框或小目标保持实验。",
+      "tldr": "HazeFlux 以 LoRA 适配少步流匹配生成先验，再用结构保持解码跳连恢复空间细节，在四个真实去雾基准上优于已有方法。",
+      "tags": [
+        "image-dehazing",
+        "image-translation",
+        "structure-preservation",
+        "domain-shift"
+      ]
+    }
+  ],
+  "others": [
+    {
+      "id": "2611.31487",
+      "title": "GDD: A Remote Sensing Image Deepfake Detection and Manipulation Localization Dataset",
+      "abstract": "Verifying image authenticity is a critical need for a variety of applications and decision-making in the remote sensing (RS) domain, yet it is becoming more challenging as advancements in generative AI enable producing increasingly realistic synthetic overhead data. However, existing RS deepfake benchmarks prioritize sheer volume at the expense of visual realism and diversity, while also lacking rigorous out-of-distribution (OOD) testing protocols to evaluate real-world robustness. To address this, we introduce the Geospatial Deepfakes Dataset (GDD), a benchmark for RS deepfake detection and manipulation localization. Rather than relying on uncurated, redundant synthetic generation, GDD comprises images across diverse modern generative models and real image sources, alongside manipulations from diffusion inpainting, splicing, and copy-move operations. Crucially, GDD establishes an OOD evaluation protocol for deepfake detection comprising unseen real image sources and generative models. We benchmark five deepfake detectors and two localization models across intra- and cross-dataset regimes and reveal that detectors trained on high-volume, uncurated benchmarks overfit to dataset-specific artifacts, whereas training on GDD yields superior cross-dataset generalization despite its compact scale. This benchmarking also exposes critical failure modes in current state-of-the-art methods. Combined, GDD and its evaluation protocol establish a high-quality standard for developing and stress-testing detection and localization models in this safety-critical RS domain. The dataset is publicly available.",
+      "authors": [
+        "Jacob Arndt",
+        "Philipe Dias",
+        "Debvrat Varshney",
+        "Sudarshan Srinivasan",
+        "Dalton Lunga"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8123,
+      "coarse_match": "真实跨域检测评测与泛化机制分析",
+      "interest_score": 0.7847,
+      "positive_score": 0.0276,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 5,
+      "matched_interests": [
+        "真实跨域检测评测与泛化机制分析"
+      ],
+      "reason": "建立针对未见真实图像来源与生成模型的 OOD 协议，并通过跨数据集实验揭示伪影过拟合和失败模式，评测思路值得借鉴。但检测对象是图像伪造而非实体目标，也不研究单源域检测器的风格泛化。",
+      "tldr": "GDD 提供多来源遥感伪造检测与篡改定位数据及 OOD 评测，表明紧凑且多样的数据比大规模未筛选数据带来更好的跨数据集泛化。",
+      "tags": [
+        "deepfake-detection",
+        "remote-sensing",
+        "ood-evaluation",
+        "dataset"
+      ]
+    },
+    {
+      "id": "2611.32970",
+      "title": "FocusAnchor: Zero-Shot Metric Depth by Anchoring a Depth Foundation Prior to Focus Cues",
+      "abstract": "Existing depth-from-focus methods can struggle with weak focus cues, new cameras, or fewer focal slices. We present FocusAnchor, a recurrent model that uses focus-volume lookups to refine metric depth and repeatedly aligns a relative depth prior from a frozen foundation model to the current depth estimate. The aligned prior guides subsequent refinement in a feedback loop, carrying metric scale recovered from textured regions into regions where focus cues are weak while preserving scene structure. To support transfer across cameras, we synthesize training stacks with randomized camera parameters and focus distances. However, stack synthesis blurs existing image noise differently across slices, creating artificial depth cues even on textureless surfaces. We add independent per-slice noise to suppress these cues. We also introduce variable-stack training to improve robustness with fewer focal slices and support more practical mobile capture. Compared with FOSSA ViT-B, FocusAnchor reduces AbsRel by 36% on NYU Depth V2 and by 9% on DDFF-12 after fine-tuning. In zero-shot evaluation, FocusAnchor and its variable-stack variant, FocusAnchor-flex, achieve the two lowest AbsRel values on all five benchmarks. On ZEDD test, FocusAnchor achieves 9% lower AbsRel than the best competing method, FOSSA ViT-B, while FocusAnchor-flex achieves lower AbsRel with 40% fewer focal slices on ZEDD validation.",
+      "authors": [
+        "Ashkan Ganj",
+        "Hang Su",
+        "Tian Guo"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.803,
+      "coarse_match": "真实跨域检测评测与泛化机制分析",
+      "interest_score": 0.7718,
+      "positive_score": 0.0312,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 5,
+      "matched_interests": [
+        "风格增强与域随机化"
+      ],
+      "reason": "通过随机化相机参数和对焦距离合成训练数据，并分析合成噪声造成的伪深度线索，对域随机化及泛化失效机制有参考价值。任务是焦点深度估计，未涉及目标检测、风格变换或边界框保持。",
+      "tldr": "FocusAnchor 将冻结的基础深度先验与焦点线索循环对齐，在五个零样本基准上取得领先的深度误差表现，并支持减少焦点切片数量。",
+      "tags": [
+        "depth-estimation",
+        "domain-randomization",
+        "zero-shot"
+      ]
+    },
+    {
+      "id": "2611.32981",
+      "title": "NEST: Uncovering and Nesting Unknown Objects in Open-World Object Detection",
+      "abstract": "Open-world object detectors aim to localize objects of classes not covered by their training annotations, but most label them only as \"unknown\". This label tells a system that an object is present but not what it is, while its broader category would allow a more informed decision. We therefore address both uncovering unknown objects and assigning them to the broader categories of a given class taxonomy. For uncovering, we find that most unknown objects are already localized and labeled \"unknown\" in our base detector, but are discarded during final top-k selection because background receives higher scores. To mitigate this, we propose a class-agnostic ranker that estimates how well each predicted box fits an object and uses these scores to select the final predictions. Across three benchmarks, our detector improves unknown recall by 3.8% to 195.1% relative to the strongest baseline in each task, while maintaining competitive known-class detection. For categorizing, we draw on Euler diagrams, in which the region of a category contains the regions of its members. Our categorizer builds each category's region from the known classes and learns how much room to leave for members it has never seen. On the same detections, it categorizes unknown objects more accurately than existing hierarchical methods. Code is available at https://github.com/TUM-AVS/NEST.",
+      "authors": [
+        "Yuchen Zhang",
+        "Yuan Gao",
+        "Sebastian Schmidt",
+        "Johannes Betz"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8721,
+      "coarse_match": "目标检测的单源域泛化",
+      "interest_score": 0.8435,
+      "positive_score": 0.0285,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 4,
+      "matched_interests": [],
+      "reason": "研究未知类别目标的发现和层次分类，可参考其检测框排序与未知目标漏检分析；但这里的未知性来自类别而非视觉域偏移，没有研究风格增强或单源域泛化。",
+      "tldr": "NEST 通过类别无关排序保留未知目标，并利用类别层次区域为其分配上位类别，在三个基准上提高未知目标召回率和分类准确性。",
+      "tags": [
+        "open-world",
+        "object-detection",
+        "unknown-objects",
+        "hierarchical"
+      ]
+    },
+    {
+      "id": "2611.31973",
+      "title": "Visual Thinking: Training-Free Active Perception for Counting and Localizing Hard-to-Find Objects",
+      "abstract": "Vision foundation models can precisely segment objects based solely on a text prompt. However, they struggle to recover objects that are small, occluded or whose appearance is poorly captured by the original textual description. Vision language models can examine the image and its context, they can propose richer descriptions of the objects to be detected. But these models struggle with precise segmentation and localization. We introduce Visual Thinking, a training-free framework that combines a vision-language model with Segment Anything Model 3 (SAM 3) through an iterative active perception loop. At each iteration, the VLM proposes short noun phrases using the image, candidate crops and history from past iterations. A controller ranks these phrases using embedding similarity between the original prompt and the proposal, an entropy-based verification priority and the novelty of the prompt. Next, SAM 3 uses prompts to detect objects in the image. We associate detections across iterations and update each object's confidence score using a weighted mean of scores obtained from SAM 3 with a larger weight for detections using narrower prompts. We supply confident detections as positive visual exemplars for SAM 3, and incorporate image tiling to recover small objects in cluttered images. We evaluate counting and localization on CARPK, FSCD-147, PixMo-Count, and OmniCount (Fruits). Compared with SAM 3, Visual Thinking reduces the counting mean absolute error (MAE) by about 18 on FSC-147 and about 8 on CARPK. It improves box average precision (AP) by more than 12 on FSCD-147 and CARPK. Visual Thinking, with fixed or no tiling, performs on par with Claude Opus 5.5 at extra-high reasoning effort, while running on single desktop GPU in about 5.91 seconds per image, compared to about 46.53 seconds per image for Claude through its API.",
+      "authors": [
+        "Emil Kielar",
+        "Pratik Chaudhari"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8503,
+      "coarse_match": "目标检测的单源域泛化",
+      "interest_score": 0.8208,
+      "positive_score": 0.0295,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 4,
+      "matched_interests": [],
+      "reason": "利用图像切块和迭代提示恢复拥挤场景中的小目标，对小目标漏检处理有方法参考价值。但它不涉及跨域增强，也没有研究外观变换时的小目标细节保护。",
+      "tldr": "Visual Thinking 无需训练，通过视觉语言模型与 SAM3 的迭代感知、提示筛选和图像切块改善难发现目标的计数与定位，在多个基准上降低计数误差。",
+      "tags": [
+        "active-perception",
+        "small-objects",
+        "counting",
+        "training-free"
+      ]
+    },
+    {
+      "id": "2611.31392",
+      "title": "Look Where Camouflage Breaks: Concealment-Guided Observation for Camouflaged Object Detection",
+      "abstract": "A camouflaged object can blend into its surroundings at one scale and become distinguishable at another. Yet a region's apparent ambiguity gives limited guidance on which observation would resolve it. The challenge is to connect the form and scale of concealment to the evidence that a new view can reveal. We introduce CamoBreak, an active framework for camouflaged object detection guided by a Concealment Spectrum. From the image and current predictions, the spectrum measures regional resemblance and boundary ambiguity across comparison scales, distinguishing persistent concealment from separation emerging at finer or broader scales. These measurements guide crop selection from the already-captured image and recognition against global foreground and background references. An object-conditioned spatial preference then selects where local evidence should update the prediction and feature memory, retaining target corrections while suppressing background distractions. Accepted corrections reshape the next measurement, while predicted segmentation benefit determines whether to observe again. Experiments across encoder families and related segmentation tasks show consistent improvements. Targeted analyses support improved small-target recovery, multiple-object coverage, and selective evidence integration. Code will be released.",
+      "authors": [
+        "Dingming Zhang",
+        "Fengyang Xiao",
+        "Jingjia Feng",
+        "Chunming He",
+        "Sina Farsiu"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8317,
+      "coarse_match": "真实跨域检测评测与泛化机制分析",
+      "interest_score": 0.8027,
+      "positive_score": 0.0289,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 4,
+      "matched_interests": [],
+      "reason": "通过多尺度边界歧义测量和局部观察改善伪装目标分割，并分析小目标恢复，可为细粒度目标证据利用提供启发。但它没有进行外观增强或跨域检测评测，不能直接对应增强中的边界框及细节保持。",
+      "tldr": "CamoBreak 根据多尺度隐蔽程度主动选择图像裁剪并选择性融合局部证据，在不同编码器和相关分割任务上取得一致提升，并改善小目标恢复。",
+      "tags": [
+        "camouflage",
+        "segmentation",
+        "active-perception",
+        "multi-scale"
+      ]
+    },
+    {
+      "id": "2611.31647",
+      "title": "MSW: a Multi-Scale Sliced Wasserstein Distance Between Image Distributions",
+      "abstract": "We propose the multi-scale sliced Wasserstein (MSW) distance between image distributions, which operates in pixel space and requires no trained network. MSW convolves images with a fixed bank of discrete cosine filters at several scales, pools the responses over all positions, and compares the resulting one-dimensional distributions using the Wasserstein distance. We pair MSW with an exact two-sample test that gives calibrated p-values. Most metrics compare two image sets in the latent space of a pretrained network. We show that these metrics are insensitive to simple perturbations of the images, because the latent space is nearly invariant to them. In contrast, MSW detects smaller perturbations than latent-space metrics and needs far fewer images to do so. Although it uses no learned features, it still detects semantic changes of the image distribution. Finally, MSW matches or outperforms existing Wasserstein-based metrics in our experiments.",
+      "authors": [
+        "Youssef Haouchat",
+        "Stanislas Ducotterd",
+        "Bassam El Rawas",
+        "Michael Unser"
+      ],
+      "categories": [
+        "cs.CV",
+        "eess.SP"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8239,
+      "coarse_match": "真实跨域检测评测与泛化机制分析",
+      "interest_score": 0.7928,
+      "positive_score": 0.0311,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 4,
+      "matched_interests": [],
+      "reason": "提出对细微图像分布变化敏感的多尺度距离，可作为衡量风格增强或域偏移程度的辅助工具。但摘要没有验证该距离与跨域检测收益的关系，也不保证目标语义或边界框保持。",
+      "tldr": "MSW 在像素空间比较多尺度余弦滤波响应分布，配合精确双样本检验，以较少样本检测比预训练特征指标更细微的分布变化，并达到有竞争力的距离评测表现。",
+      "tags": [
+        "distribution-distance",
+        "wasserstein",
+        "multi-scale",
+        "image-metrics"
+      ]
+    },
+    {
+      "id": "2611.32151",
+      "title": "Let The Pixels Through: Rethinking Long Skip Connections for Scalable Pixel Diffusion",
+      "abstract": "Training pixel diffusion models remains less straightforward, owing to the ad hoc training recipes and architecture designs, along with the sensitivity to hyper-parameter choices. We show that strong denoisers can be built by refining existing pixel-native designs from the literature. Specifically, we revisit the long skip connection in U-Net and find that the optimization benefit commonly attributed to it is not necessary for its denoising benefit. We further find that the conventional linear combination of features from the skip and main backbone is inadequate for regimes of various noise levels. Motivated by these observations, we introduce two core modifications. First, we adopt asymmetric long skips, which propagate fine-grained information from input embeddings to decoder layers. Second, we introduce adaGLU, a SwiGLU-like MLP block, in decoder layers to adaptively filter information from the embeddings before being added to main-branch features. The above designs give a simple pixel diffusion transformer architecture. When trained from scratch, it scales smoothly from small-scale baselines up to 1.6B parameters, achieving 1.62 and 1.70 FID on ImageNet-256 and -512, respectively. Besides, it natively supports multimodal inputs, such as text and images, yielding competitive performance in text-to-image generation. We release our codes at https://github.com/AMAP-ML/PiT",
+      "authors": [
+        "Jiachen Lei",
+        "Jiahong Wu",
+        "XiangXiang Chu"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8055,
+      "coarse_match": "真实跨域检测评测与泛化机制分析",
+      "interest_score": 0.7738,
+      "positive_score": 0.0317,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 4,
+      "matched_interests": [],
+      "reason": "非对称长跳连和自适应门控用于传递与筛选细粒度像素信息，可为细节友好的图像转换架构提供参考；但论文未验证风格增强、边界框保持或跨域检测收益。",
+      "tldr": "论文通过非对称长跳连与 adaGLU 构建像素扩散 Transformer，在 ImageNet-256 和 ImageNet-512 上分别达到 1.62 和 1.70 FID，并公开代码。",
+      "tags": [
+        "pixel-diffusion",
+        "fine-details",
+        "image-generation"
+      ]
+    },
+    {
+      "id": "2611.33017",
+      "title": "E-MAPS: Event-Based Promptable Video Segmentation with Memory-as-Prompt",
+      "abstract": "RGB-based video object segmentation (VOS) remains brittle under fast motion and adverse illumination. Event cameras preserve signal under blur and challenging exposure, but provide little evidence when motion slows. Interaction can restore object state for subsequent propagation, yet promptable event methods merely address single windows. We formalize event-based Promptable Video Segmentation (ePVS), where prompts at arbitrary windows initialize, correct, or introduce objects and predictions. We present Event Memory-As-Prompt Segmentation (E-MAPS), which transfers a pretrained promptable segmenter to event streams and learns propagation and correction. Event-to-Token (E2T) aligns recurrent event features with pretrained representations while preserving prompt-conditioning priors. Memory-Aware Prompting (MAP) converts object-conditioned history into sparse prompts, allowing memory and user inputs to share one decoder pathway efficiently. We construct Event-View Masklets (EViM) from 206K aligned RGB-event pairs and 620K masks for two-stage representation transfer and native event-video learning, and establish three training-disjoint benchmarks. E-MAPS leads prompt-once and interactive ePVS across all three benchmarks while being more efficient. It further demonstrates strong performance on zero-shot object tracking benchmarks. Project page: https://github.com/adonaydem/emaps-wacv",
+      "authors": [
+        "Adonay Demewez Gebremedhin",
+        "Mohamad Alansari",
+        "Wessam Shehieb",
+        "Muzammal Naseer",
+        "Hasan AlMarzouqi",
+        "Sajid Javed",
+        "Naoufel Werghi"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8023,
+      "coarse_match": "目标检测的单源域泛化",
+      "interest_score": 0.7722,
+      "positive_score": 0.0301,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 4,
+      "matched_interests": [],
+      "reason": "针对快速运动和恶劣光照下的视觉鲁棒性，并将预训练分割器迁移到事件流，具有跨模态表征迁移的参考价值。但核心是可交互视频分割，不研究单源域检测泛化或风格增强。",
+      "tldr": "E-MAPS 通过事件特征对齐和记忆提示实现可交互事件视频分割，在三个基准上取得领先表现，并展示零样本跟踪能力。",
+      "tags": [
+        "event-camera",
+        "video-segmentation",
+        "representation-transfer"
+      ]
+    },
+    {
+      "id": "2611.32431",
+      "title": "NRG-Twins: Pixel-Level Ground Truth for Rigidity Violations in Generated Videos",
+      "abstract": "Video generators now produce realistic clips of scenes and objects, which makes generated video an attractive source of 3D content. Yet generated video is not 3D consistent: static content slowly deforms or slides, 3D reconstruction degrades, and the errors are too subtle to label by hand. To make generators 3D consistent, or to build rewards and guidance that push them there, we need data that say where and by how much a generated video breaks rigidity, and these data must come from generated video itself. We obtain per-pixel ground-truth labels from real-generated twins: a real clip paired with its re-creation by a keyframe-conditioned video generator. After inserting real keyframes so that the twin camera roughly follows the real one, we measure per pixel, in degrees, how far the twin departs from a rigid scene seen along its own camera path. We release Non-Rigidly Generated Twins (NRG-Twins), 871 twins, the code that builds them for new generators, and a benchmark with an official test split. A detector trained on these data, the Non-Rigidly Generated Pixel Detector (NRG-PD), predicts the per-pixel angle from RGB alone. It separates inconsistent from consistent pixels with AUROC 0.85, against 0.40-0.74 for seven existing consistency and motion-segmentation methods, and its predictions improve 3DGS of video that contains generated content.",
+      "authors": [
+        "Chenrui Fan",
+        "Qiyang Hu",
+        "Luca Scharr",
+        "Paolo Favaro"
+      ],
+      "categories": [
+        "cs.CV",
+        "cs.AI"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.799,
+      "coarse_match": "真实跨域检测评测与泛化机制分析",
+      "interest_score": 0.7683,
+      "positive_score": 0.0307,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 4,
+      "matched_interests": [
+        "外观变换中的语义与边界框保持"
+      ],
+      "reason": "利用真实与生成视频配对量化像素级几何形变，可为检查生成式增强是否破坏目标结构提供间接参考。但其关注三维刚性一致性，未评估语义、边界框保持或跨域检测收益。",
+      "tldr": "NRG-Twins 提供 871 对真实—生成视频及像素级刚性违背标注，训练的检测器达到 0.85 AUROC，并改善含生成内容视频的三维高斯重建。",
+      "tags": [
+        "video-generation",
+        "geometric-consistency",
+        "pixel-benchmark"
+      ]
+    },
+    {
+      "id": "2611.32011",
+      "title": "Distractors are the Real Enemy: Visual Distraction Adversarial Perturbations on SAM2-Based Video Tracking and Segmentation",
+      "abstract": "Promptable video trackers such as SAM2 achieve accurate and robust performance through strong temporal consistency, making them important foundations for downstream video understanding and tracking applications. As their use continues to expand, understanding their robustness to adversarial perturbations becomes increasingly important. Existing attacks on SAM2 largely focus on local mask degradation and short-term temporal feature disruption, leaving its longer-term dynamics and competing object interferences (Distractors) insufficiently explored. We observe that SAM2 itself exposes useful distractor cues when tracking becomes uncertain. Based on these observations, we propose DistractAttack, a white-box attack that uses background distractors to disrupt target tracking persistently. Its core procedure, Counterfactual Distractor Search (CDS), propagates clean and attacked trajectories in parallel to discover plausible competing regions and identify those that become increasingly effective under perturbation. The discovered evidence is accumulated over time to weaken target support and promote recurrent alternatives or disappearance predictions. Extensive experiments under video-level and one-shot perturbations across Visual Object Tracking and Video Object Segmentation demonstrate strong attack effectiveness, raising DRE to $4.4\\times$ and NRE to $7.3\\times$ their nearest baselines under video perturbation, while transferring effectively across model scales and tracker variants in black-box settings. Project page: https://adonaydem.github.io/sam2-da-page/",
+      "authors": [
+        "Adonay Demewez Gebremedhin",
+        "Mohamad Alansari",
+        "Wessam Shehieb",
+        "Muzammal Naseer"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.7987,
+      "coarse_match": "真实跨域检测评测与泛化机制分析",
+      "interest_score": 0.7696,
+      "positive_score": 0.0291,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 4,
+      "matched_interests": [],
+      "reason": "通过背景干扰物分析 SAM2 长时跟踪失效，并评测攻击在不同模型规模和跟踪器间的迁移，具有视觉鲁棒性与失败机制分析的交集。但这里研究的是对抗扰动，而非未知自然域上的检测泛化。",
+      "tldr": "DistractAttack 通过并行传播干净与受攻击轨迹搜索干扰物，持续诱导跟踪漂移或目标消失，在视频跟踪与分割实验中显著增强攻击效果。",
+      "tags": [
+        "adversarial-attack",
+        "video-tracking",
+        "robustness"
+      ]
+    },
+    {
+      "id": "2611.32467",
+      "title": "TDD: Target-Discrepancy Distillation for Underwater Image Enhancement",
+      "abstract": "Underwater degradation changes image appearance and can compromise the semantic cues used to guide enhancement. Identifying scene content alone does not explicitly specify the appearance to recover or the input-dependent changes associated with that target. We propose target-discrepancy knowledge distillation (TDD) for underwater image enhancement, which organizes guidance around these two aspects of the same restoration problem. For each degraded-reference training pair, reference features from an underwater vision-language teacher provide target-appearance supervision, while paired feature residuals describe the observation's discrepancy relative to the same target. Both representations are jointly distilled into a lightweight guidance network that predicts them from the degraded image alone; neither the teacher nor reference images are required at inference. To align their use with their supervisory roles, we introduce progressive knowledge fusion within a multi-scale enhancement network. The estimated discrepancy first conditions spatial feature updates, after which target-appearance guidance refines the updated features and channel interactions consolidate their responses. This correction-before-refinement design lets target-guided refinement build on discrepancy-conditioned features. Experiments on six underwater benchmarks demonstrate competitive performance across full-reference and no-reference metrics. Ablations and feature visualizations analyze the contributions of the knowledge source, joint distillation, and progressive fusion.",
+      "authors": [
+        "Zefan Feng",
+        "Zhaocheng Yu",
+        "Laibin Chang",
+        "Kui Jiang",
+        "Junjun Jiang",
+        "Xiaopeng Fan"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.7985,
+      "coarse_match": "真实跨域检测评测与泛化机制分析",
+      "interest_score": 0.7692,
+      "positive_score": 0.0292,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 4,
+      "matched_interests": [],
+      "reason": "利用目标外观特征和退化残差指导水下图像增强，对设计外观校正或图像转换模块有方法上的参考价值。但训练依赖退化—参考配对，摘要未报告检测性能、未知域泛化或边界框与小目标保持。",
+      "tldr": "TDD 将参考外观与退化差异联合蒸馏到轻量引导网络，再以先校正后细化的多尺度融合增强水下图像，在六个基准上取得有竞争力的结果。",
+      "tags": [
+        "underwater",
+        "image-enhancement",
+        "distillation"
+      ]
+    },
+    {
+      "id": "2611.32206",
+      "title": "Seeing Is Not Reaching: Instruction Shortcuts Override Visual Grounding in Vision-Language-Action Models",
+      "abstract": "Vision-language-action models (VLAs) are expected to inherit visual grounding from vision-language models, yet often reach for an object's training location after it has been moved. Across six VLAs, we identify two shortcuts: a scene shortcut, where the arm follows the scene's original task despite a new instruction, and an instruction shortcut, where the instruction retrieves the requested object's training location. In $\\pi_{0.5}$, the instruction shortcut persists even though object-name attention follows the moved target. We call this Seeing Is Not Reaching. To determine whether this grounding is unused or overridden, we separately mask an image-mediated grounding pathway and a direct instruction-to-action pathway. Masking the grounding pathway eliminates reaches to moved targets, whereas masking the direct pathway increases them. Thus, grounding already guides action but is often overridden by the instruction shortcut, which acts through the direct pathway. We introduce Pathway-Separated Guidance (PSG), which amplifies grounding and suppresses the shortcut without training or external target locations. On LIBERO-PRO Object under Position perturbations, PSG raises the target-reaching rate from 22.0% to 52.6% and task success from 16.6% to 40.8%, while largely preserving performance on the original tasks.",
+      "authors": [
+        "Qing Zhang",
+        "Xuesong Li",
+        "Zhaoyuan Yang",
+        "Changlin Song",
+        "Xinyu Tian",
+        "Jing Zhang"
+      ],
+      "categories": [
+        "cs.CV",
+        "cs.RO"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.7956,
+      "coarse_match": "跨域增强中的小目标细节保护",
+      "interest_score": 0.7656,
+      "positive_score": 0.03,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 4,
+      "matched_interests": [],
+      "reason": "通过位置扰动和路径屏蔽揭示模型依赖训练位置的捷径，并提供免训练修正，契合对鲁棒性机制与失败案例的关注。但任务是机器人动作生成，偏移类型也不是检测中的外观域变化。",
+      "tldr": "论文发现视觉语言动作模型的指令捷径会覆盖已有视觉定位，并用路径分离引导将位置扰动下的目标到达率从 22.0% 提升至 52.6%、任务成功率从 16.6% 提升至 40.8%。",
+      "tags": [
+        "robotics",
+        "shortcut-learning",
+        "visual-grounding",
+        "robustness"
+      ]
+    },
+    {
+      "id": "2611.32299",
+      "title": "Towards a Multimodal Aesthetic Agent for Photographic Reference Grading",
+      "abstract": "Reference-guided photographic color grading helps users realize their aesthetic intent by selectively drawing on the color and tonal characteristics of a reference photograph. Doing so requires understanding which characteristics users wish to adopt and translating these preferences into controllable edits. However, image-only reference methods align overall appearance without instruction-grounded selection, while pixel-space generative editors typically produce flattened images without editable parameters, limiting subsequent refinement. To address these challenges, we introduce JarvisAura, a multimodal aesthetic agent that formulates photographic color grading as structured decision-making in an editable parameter space. JarvisAura offers three key advantages: (1) an aesthetic agent paradigm that integrates visual attribute perception, strategy-level reasoning, and parameterized execution for interpretable and controllable photographic color grading; (2) a unified reasoning-to-execution pipeline that connects aesthetic planning with backend rendering and editable parameter refinement; and (3) a three-stage training strategy comprising Parameter-Grounded Continual Pre-Training for parameter-appearance grounding, Reference-Grounded Supervised Fine-Tuning for reference-guided reasoning and parameter decisions, and Reference-Aligned Group Relative Policy Optimization for rendered-outcome refinement with multidimensional rewards and dynamic data derivation. On Ref-Bench, JarvisAura achieves the best scores among methods with results across reported automatic metrics and a 74% human-rated task-success rate, exceeding GPT-Image-2.5 by 9 percentage points.",
+      "authors": [
+        "Kunjie Lin",
+        "Haitao Zhang",
+        "Bosheng Chen",
+        "Lanhui Xu",
+        "Gaofeng Pan",
+        "Yuxin Lin",
+        "Tianjiao Liu",
+        "Yi Yang",
+        "Yue Huang",
+        "Xinghao Ding",
+        "Zixu Lin",
+        "Yunlong Lin"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.7948,
+      "coarse_match": "跨域增强中的小目标细节保护",
+      "interest_score": 0.7599,
+      "positive_score": 0.0348,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 4,
+      "matched_interests": [],
+      "reason": "参考图驱动的颜色与色调迁移、可编辑参数化执行，可作为构建可控外观增强的候选工具思路。但论文面向摄影审美调色，未说明将其用于域随机化，也未验证检测框、小目标细节保持或跨域检测收益。",
+      "tldr": "JarvisAura 将参考摄影调色建模为多模态智能体在可编辑参数空间中的决策，并通过三阶段训练连接审美推理与渲染执行，所给摘要未展示完整评测结果。",
+      "tags": [
+        "color-grading",
+        "reference-guided",
+        "multimodal-agent"
+      ]
+    },
+    {
+      "id": "2611.31589",
+      "title": "Spec$^2$R: Recovering Emergent Properties in Supervised Vision Transformers",
+      "abstract": "Vision Transformers (ViTs) have achieved strong performance across computer vision tasks, but the quality of their learned representations differs drastically depending on the training paradigm. While self-supervised ViTs often demonstrate emergent properties, such as object-aligned patch representations and attention maps, supervised ViTs typically lack these properties, even when trained with strong data augmentations. Understanding the origin of this difference is important for explaining and controlling the object-level structure. To investigate it, we perform a spectral analysis of supervised and self-supervised models, and identify a key distinction: MLP layers in supervised ViTs introduce high-frequency variations into patch representations, disrupting their spatial organization. Motivated by this finding, we propose Spec$^2$R, a lightweight spectral regularization method that fine-tunes the MLP layers of pretrained supervised ViTs. Spec$^2$R recovers object-aligned patch representations and attention maps, while improving adversarial robustness and preserving competitive classification accuracy.",
+      "authors": [
+        "Adam Wr\\'obel",
+        "Jacek Tabor",
+        "Bartosz Zieli\\'nski",
+        "Marcin Przewi\\k{e}\\'zlikowski"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8316,
+      "coarse_match": "目标检测的单源域泛化",
+      "interest_score": 0.801,
+      "positive_score": 0.0307,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 3,
+      "matched_interests": [],
+      "reason": "对监督 ViT 的空间表征退化进行频谱机制分析，并改善目标对齐表征和对抗鲁棒性，具有表征层面的间接参考价值。但对抗鲁棒性并不等同于跨域鲁棒性，摘要未涉及目标检测或域泛化实验。",
+      "tldr": "Spec²R 发现监督 ViT 的 MLP 引入高频空间扰动，并通过轻量频谱正则化微调恢复目标对齐表征，同时提升对抗鲁棒性且保持分类性能。",
+      "tags": [
+        "vision-transformer",
+        "spectral-analysis",
+        "regularization",
+        "robustness"
+      ]
+    },
+    {
+      "id": "2611.32242",
+      "title": "Can You Find the Edit When Nothing Looks Wrong? A Paired Benchmark for Text-Driven Image Manipulation Localization Beyond Semantic Abnormality",
+      "abstract": "Instruction-driven image editing can alter a photograph while keeping the result coherent with the scene. Existing benchmarks lack matched plausible and anomalous edits of the same target, making it difficult to measure how localization performance changes with semantic plausibility. We construct a paired benchmark by generating semantically plausible and anomalous replacements of the same target in each source photograph. Both edits use the same editor, language, and generation settings. We estimate a separate mask for each output and retain pairs with sufficient mask overlap, enabling direct comparison of localization performance under the two semantic conditions. The release contains 47,747 bilingual triplets from 6,500 photographs, spanning four editors, three source domains, and six intended violation types. Across nine public localizers, editor-averaged IoU is lower on plausible edits in 26 of 27 model-dataset comparisons. This gap persists under pixel-change controls and region-size analyses. These findings reveal a semantic-plausibility shortcut: localization often weakens when an edited result looks ordinary. The benchmark provides a controlled setting for measuring this gap and developing localizers that remain effective on plausible edits.",
+      "authors": [
+        "Peiyu Zhuang",
+        "Jianquan Yang",
+        "Zhuoying Cai",
+        "Yi Jiang",
+        "Yingquan Chen",
+        "Xinle Wang",
+        "Zeqin Yu",
+        "Dongdong Lin",
+        "Ruitao Xie",
+        "Kaige Li",
+        "Xiaochun Cao"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8257,
+      "coarse_match": "真实跨域检测评测与泛化机制分析",
+      "interest_score": 0.7933,
+      "positive_score": 0.0325,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 3,
+      "matched_interests": [],
+      "reason": "通过配对编辑揭示定位模型依赖语义异常的捷径，对分析生成图像带来的评测偏差有间接启发。但任务是编辑区域取证定位，且主动替换目标语义，并非保持检测标签的风格变换或跨域检测。",
+      "tldr": "构建同一目标的语义合理与异常编辑配对基准，发现九种定位模型普遍更难定位合理编辑，且差距在控制像素变化和区域大小后仍存在。",
+      "tags": [
+        "image-editing",
+        "forensics",
+        "benchmark",
+        "shortcut-learning"
+      ]
+    },
+    {
+      "id": "2611.32551",
+      "title": "UnifiedAD: One-Shot Anomaly Detection across Modalities via Evidence Calibration",
+      "abstract": "Both single-modal and multi-modal anomaly detection aim to identify deviations from normal patterns, providing a common foundation for unified detection. However, existing methods rely on modality-specific modeling and scoring, making it difficult to obtain comparable anomaly evidence with limited normal references. To that end, we propose UnifiedAD, which unifies single-modal and multi-modal anomaly detection through anomaly evidence calibration, requiring only one normal reference per target category and no gradient updates. Specifically, we first derive neuron-level discriminative priors from normal and anomalous samples in an independent auxiliary dataset and combine them with neuron response consistency under normality-preserving transformations of the target reference to select reliable neurons, termed anomaly neurons, and identify anomaly directions. Next, we construct a low-rank normal subspace for each layer and modality from the selected neurons' spatial responses to the reference and quantify query feature deviations from normal structure using projection residuals. Finally, we separately calibrate projection residuals and anomaly-direction responses using the response distributions obtained from the normal reference and its transformations, converting them into comparable anomaly evidence for aggregation across layers and modalities. Experiments on multiple anomaly detection benchmarks demonstrate that UnifiedAD achieves strong performance in both image-level anomaly detection and pixel-level anomaly localization.",
+      "authors": [
+        "Shangze Li",
+        "Chuancheng Shi",
+        "Simiao Xie",
+        "Wenhua Wu",
+        "Xingyu Zhu",
+        "Fei Shen",
+        "Tat-Seng Chua"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.815,
+      "coarse_match": "真实跨域检测评测与泛化机制分析",
+      "interest_score": 0.7859,
+      "positive_score": 0.0291,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 3,
+      "matched_interests": [],
+      "reason": "利用保持正常性的变换筛选稳定神经元，并从辅助数据迁移异常先验，对鲁棒表征有一定方法启发；但异常检测不等同于目标检测，也未评估未知域上的检测泛化。",
+      "tldr": "UnifiedAD 通过神经元筛选、低秩正常子空间和证据校准，仅用每类一个正常参考且无需梯度更新，实现跨模态异常检测。",
+      "tags": [
+        "anomaly-detection",
+        "one-shot",
+        "evidence-calibration"
+      ]
+    },
+    {
+      "id": "2611.31397",
+      "title": "CoRe: Jointly Learning Contextual Representations for Understanding and Generation",
+      "abstract": "We introduce CoRe, in which understanding and generation jointly shape one contextual representation for images and one for text, trained from scratch. Each representation is read for understanding, conditions the other modality, and is the space in which that modality is generated by a continuous flow from Gaussian noise. With 383M parameters trained on CC12M and no pretrained language model, text encoder, or VAE at inference, CoRe matches a same-data contrastive-only baseline in global understanding and reaches COCO-30K FID 10.10, comparable to much larger generators built on pretrained components. In controlled comparisons at equal data and architecture, CoRe generates better in both directions (text to image and image to text) than a representation shaped by understanding alone and then frozen, and follows prompts better than generating in a space that understanding does not shape. In the other direction, with an attentive segmentation probe, on monocular depth, and when read by a frozen language model, CoRe surpasses the contrastive-only baseline: generation adds information that stronger readouts reach. Because generation runs inside the understanding representation, frozen real-image probes read and steer intermediate states and the model ranks its own samples without extra training. Because both modalities use continuous flows, both also distill to a few steps. Our controls indicate why one representation suffices: understanding organizes the representation semantically, while generation makes it retain more information.",
+      "authors": [
+        "Hangke Sui",
+        "Chang Li",
+        "Yuyan Li",
+        "Mohammad Haris Baig",
+        "Daniel Ulbricht"
+      ],
+      "categories": [
+        "cs.CV",
+        "cs.CL",
+        "cs.LG"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8099,
+      "coarse_match": "目标检测的单源域泛化",
+      "interest_score": 0.7797,
+      "positive_score": 0.0302,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 3,
+      "matched_interests": [],
+      "reason": "联合理解与生成的语义表征，以及用冻结探针引导生成的机制，可能为语义可控增强提供间接启发；但摘要未研究风格转换、边界框保持或跨域检测收益。",
+      "tldr": "CoRe 从零联合学习用于理解和连续流生成的图文表征，在保持全局理解能力的同时改善生成质量及部分密集视觉任务表现。",
+      "tags": [
+        "joint-representation",
+        "image-generation",
+        "multimodal"
+      ]
+    },
+    {
+      "id": "2611.32138",
+      "title": "VIDE : Training-Free Video Anomaly Detection via Visual Intrinsic Distribution Estimation",
+      "abstract": "In embedding-based video anomaly detection (VAD), normal clips can have high similarity to anomalous descriptions, an anomaly bias that leads to false positives. Methods such as PRISM mitigate this bias by measuring deviations from a normality reference along anomaly directions. Both the normality reference and the anomaly directions are derived from text and shared across videos, although normal activity and the appearance of anomalies vary across scenes. The resulting scores are also sensitive to prompt selection. To address these limitations, we propose Visual Intrinsic Distribution Estimation (VIDE), a training-free framework that adapts text-derived scoring to each test video using frozen clip embeddings. VIDE estimates normal scene content from clips with low initial anomaly scores and uses this estimate to partially correct the textual reference. It then rescales category responses, penalizes clips with strong responses across categories, and refines the anomaly directions using high-scoring clips. VIDE averages scores across prompt views to reduce sensitivity to prompt selection and fuses scores from two frozen encoders. With both encoders, VIDE improves AUC over the best PRISM result by $1.5$, $1.9$, and $3.5$ points on UCF-Crime, XD-Violence, and MSAD, respectively, and AP by $6.5$ points on XD-Violence and $9.3$ points on MSAD. VIDE yields the highest AUC among the compared training-free methods on all three benchmarks and the highest reported AUC among all compared methods on XD-Violence and MSAD. Our code is included in the supplementary material and will be made publicly available.",
+      "authors": [
+        "Kevin D. Nguetche",
+        "Atif Belal",
+        "Lilian Hollard",
+        "Eric Granger",
+        "Marco Pedersoli"
+      ],
+      "categories": [
+        "cs.CV",
+        "cs.AI",
+        "cs.LG"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8073,
+      "coarse_match": "风格增强与域随机化",
+      "interest_score": 0.7782,
+      "positive_score": 0.0291,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 3,
+      "matched_interests": [],
+      "reason": "通过估计每个测试视频的正常场景分布来修正异常评分，涉及场景变化下的视觉鲁棒性；但任务是视频异常检测，不涉及边界框目标检测、单源域泛化或风格增强。",
+      "tldr": "VIDE 利用冻结视觉编码器估计视频内在分布并校正文本异常评分，在三个异常检测基准上相对 PRISM 提升 AUC 1.5–3.5 个百分点。",
+      "tags": [
+        "video-anomaly",
+        "training-free",
+        "scene-adaptation"
+      ]
+    },
+    {
+      "id": "2611.32463",
+      "title": "Describe, Don't Ask: Caption-Driven On-Policy Distillation for Fine-Grained Visual Perception",
+      "abstract": "Vision-language models (VLMs) often recognize fine-grained details more accurately in a relevant crop than in the full image. Multimodal on-policy distillation (OPD) methods exploit this by transferring the advantage of a crop-view teacher to a full-image student. However, their supervision relies on region-specific questions curated through an elaborate synthesis pipeline, which brings three weaknesses: (1) every region needs a question--answer pair written exclusively for it, locking training into costly QA curation that is hard to scale to unlabeled images; (2) all rollouts of a region answer the same question, so the teacher supervises only the details it asks about, leaving other visual elements in the region unsupervised; and (3) every question presupposes that its target exists, so the student becomes prone to answering even when the target is absent. In this paper, we study how to turn unlabeled images into broad visual supervision through multi-aspect self-description and privileged-view distillation, and propose CaptionOPD, which replaces tailored questions with a fixed set of image-agnostic caption prompts, ranging from general descriptions to focused captions of parts, colors, counts, text, and layout. The rollouts of a region receive different prompts, so the teacher supervises various aspects of the region. Moreover, because caption prompts mask the model to describe what is visible instead of querying a specific target, they avoid presupposing what the region contains. Using the model itself as the crop-view teacher, CaptionOPD requires no questions, no answers, and no larger model annotations: only images and region boxes. Experiments show that, trained on the same images and regions, CaptionOPD outperforms prior OPD methods across multiple fine-grained and general perception benchmarks.",
+      "authors": [
+        "Haozhan Shen",
+        "Liangbo He",
+        "Jun Lan",
+        "Huijia Zhu",
+        "Weiqiang Wang",
+        "Tiancheng Zhao",
+        "Jianwei Yin"
+      ],
+      "categories": [
+        "cs.CV",
+        "cs.AI"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8072,
+      "coarse_match": "目标检测的单源域泛化",
+      "interest_score": 0.7766,
+      "positive_score": 0.0305,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 3,
+      "matched_interests": [],
+      "reason": "将局部裁剪中的细粒度信息蒸馏到整图模型，对局部细节感知有一定启发；但不研究跨域增强中的小目标保护，也没有目标检测域泛化评测。",
+      "tldr": "CaptionOPD 用固定的多方面描述提示替代区域专属问答，将裁剪教师的细粒度视觉知识蒸馏给整图学生，以扩大监督覆盖并减少目标存在性预设。",
+      "tags": [
+        "vision-language",
+        "distillation",
+        "fine-grained"
+      ]
+    },
+    {
+      "id": "2611.32816",
+      "title": "SpatialArena: Where Do Geometric Foundation Models Stand?",
+      "abstract": "3D perception is shifting from task-specific pipelines to geometric foundation models: monocular depth networks, feed-forward 3D/4D reconstruction models, and vision--language models that predict geometry. However, their progress cannot be measured reliably. Published numbers are not comparable, because every paper samples frames, sets resolutions, and selects test splits differently. They are not robust because the alignment required for every up-to-scale prediction can outweigh the gap between models: fitting depth in the wrong space nearly triples its error, and standard trajectory alignment understates the error of failing methods by up to $2.6\\times$. And they rarely cover long recordings, dynamic scenes, or aerial views. We present SpatialArena, an open arena that scores geometric models with the same metrics and rules, with robust and deterministic alignment. SpatialArena spans five tasks, from monocular depth to SLAM. It covers 23 public datasets with 418,929 images across indoor, outdoor, aerial, object-centric, and dynamic scenes, together with Spatial Arena, our own captures with accurate poses and depth. Evaluating 52 models, we find that single-image depth is close to saturation on public benchmarks but not on large, uncontrolled scenes, and that progress now comes from consistency across frames and views, where feed-forward 3D/4D models match or surpass monocular specialists and overtake video depth models. The benchmark, toolbox, and leaderboard will be publicly released.",
+      "authors": [
+        "Yu Chen",
+        "Haosen Yang",
+        "Su Ee Tan",
+        "Zhensong Zhang",
+        "Jifei Song",
+        "Jiankang Deng"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8065,
+      "coarse_match": "真实跨域检测评测与泛化机制分析",
+      "interest_score": 0.7772,
+      "positive_score": 0.0293,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 3,
+      "matched_interests": [],
+      "reason": "统一多场景评测并揭示模型在大型非受控场景中的不足，具有鲁棒性评测的方法论价值；但研究对象是深度估计、三维重建和 SLAM，而非跨域目标检测。",
+      "tldr": "SpatialArena 以统一指标和确定性对齐规则评测 52 个几何模型，发现公开基准上的单图深度表现接近饱和，而非受控场景及跨帧一致性仍具挑战。",
+      "tags": [
+        "geometry",
+        "benchmark",
+        "robust-evaluation"
+      ]
+    },
+    {
+      "id": "2611.32621",
+      "title": "ShapeQuest: Towards Granularity-Controlled Edit-Conditioned 3D Asset Retrieval",
+      "abstract": "Given a reference asset and an instruction such as \"remove one armrest,\" a retriever must find variants that make the edit and preserve the other parts. This search is well established for images but remains underexplored for individual 3D assets. To study this problem, we introduce ShapeQuest and ShapeQuester, a new benchmark and model for edit-conditioned 3D asset retrieval. ShapeQuest's open-source pipeline edits textured meshes through part additions, removals, and material and colour changes. It controls edit granularity across five levels, defined by the fraction of the object's surface area each edit affects. It constructs multiple valid targets when an instruction leaves the choice of part open. A vision-language model judges each edit from views chosen to expose the edited parts, and human raters audit its judgments. ShapeQuest has 87,824 queries in 50 categories and a 50,919-shape gallery with competing edits. To distinguish these variants, ShapeQuester learns retrieval alongside reconstruction of the edited point cloud, with part masks supervising changed and preserved regions. With a frozen pretrained point encoder, ShapeQuester reaches 50.4 operation-macro mAP@10 on the test split, against 47.2 for the fusion baseline with the same inputs and 48.6 for the strongest baseline. Reconstruction adds 6.5 points on the validation split when the point encoder is trained from scratch, including 3.3 from part masks.",
+      "authors": [
+        "Faris Abu-Ali",
+        "Sankalp Sinha",
+        "Didier Stricker",
+        "Muhammad Zeshan Afzal"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8062,
+      "coarse_match": "外观变换中的语义与边界框保持",
+      "interest_score": 0.7748,
+      "positive_score": 0.0314,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 3,
+      "matched_interests": [],
+      "reason": "编辑粒度控制与改变区域、保留区域的显式监督，对局部编辑约束有间接参考价值；但其目标是三维资产检索，并非外观增强中的检测语义、边界框或小目标保护。",
+      "tldr": "ShapeQuest 提供可控编辑粒度的三维资产检索基准，ShapeQuester 联合检索与编辑后点云重建，在测试集上达到 50.4 的操作宏平均 mAP@10。",
+      "tags": [
+        "3d-retrieval",
+        "controlled-editing",
+        "part-supervision"
+      ]
+    },
+    {
+      "id": "2611.32675",
+      "title": "TokenMatte: Unlocking T2V Diffusion Priors for Pixel-Native Video Matting",
+      "abstract": "High-resolution video matting requires accurate recovery of continuous alpha values, including fine hair, soft boundaries, and motion blur, yet dense alpha supervision remains scarce. Pretrained text-to-video diffusion transformers (DiTs) offer rich spatio-temporal priors, whereas existing generative video matting approaches typically route alpha predictions through RGB-trained VAE latents, which can attenuate fine details and introduce additional decoding overhead. We present TokenMatte, which adapts a pretrained video DiT into a single-pass, auxiliary-free RGB-to-alpha predictor with a pixel-native output interface. At its core is a single shared linear readout that maps each spatio-temporal token directly to its corresponding ($t \\times p \\times p$) block of alpha pixels, predicting spatial details and temporal variations within the same local video block. Tiling these blocks produces the full-resolution alpha sequence without a convolutional decoder or learned upsampling. The predicted alpha is supervised directly in pixel space, while the ground-truth alpha never enters the VAE, eliminating target-side alpha encoding and output-side VAE decoding. Leveraging the pretrained video prior, TokenMatte is trained using only existing public matting datasets, without additional data curation or auxiliary inputs at inference. Compared with a matched latent-output baseline, our pixel-native interface improves matting accuracy while achieving a 1.51$\\times$ inference speedup. TokenMatte establishes a new auxiliary-free state of the art on VideoMatte, YouTubeMatte, and V-HIM60.",
+      "authors": [
+        "Zanyi Wang",
+        "Dengyang Jiang",
+        "Fengfei Yu",
+        "Shilong Liu"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.7989,
+      "coarse_match": "风格增强与域随机化",
+      "interest_score": 0.7665,
+      "positive_score": 0.0324,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 3,
+      "matched_interests": [],
+      "reason": "直接从时空 token 输出像素级 alpha、避免 VAE 编解码损失细节的设计，对理解生成式处理中的边界与细节保真有一定启发。但任务是视频抠图，没有研究风格增强、检测框保持或跨域检测。",
+      "tldr": "TokenMatte 将预训练视频扩散模型改造成单次前向的像素级视频抠图器，相比匹配的潜空间输出基线提高精度并实现 1.51 倍推理加速。",
+      "tags": [
+        "video-matting",
+        "diffusion",
+        "detail-preservation"
+      ]
+    },
+    {
+      "id": "2611.32817",
+      "title": "Beyond Image-Text Pairs: Aligning Semantic Changes for Fine-Grained Visual Understanding",
+      "abstract": "Image-text alignment serves as a foundation for modern vision-language models (VLMs), yet prevailing training paradigms provide limited supervision for learning how semantic changes correspond across modalities. To address this limitation, we propose a post-training method that learns cross-modal semantic change correspondences through controlled visual and textual variations. Specifically, we introduce a Semantic Difference Alignment (SDA) loss which can align the directions of corresponding visual and textual representation changes. We combine our proposed SDA with pairwise sigmoid matching to jointly learn image-text correspondences and cross-modal semantic changes, encouraging more fine-grained and discriminative visual representations. To support this learning, we construct VarFamily-40K, a dataset of image-text pairs with controlled cross-modal semantic variations. Experiments demonstrate consistent improvements in compositional understanding and downstream classification performance, alongside further gains on multimodal tasks when the adapted visual encoder is integrated into VLMs.",
+      "authors": [
+        "Yujie Sun",
+        "Zeqing Wang",
+        "Shuang Liang",
+        "Zhenlin Zhao",
+        "Kunyu Zhang",
+        "Xiaowu Sun"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.7961,
+      "coarse_match": "跨域增强中的小目标细节保护",
+      "interest_score": 0.7657,
+      "positive_score": 0.0304,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 3,
+      "matched_interests": [],
+      "reason": "利用受控视觉与文本变化对齐语义变化方向，可为区分增强中的语义变化与外观变化提供表征学习思路。但论文主要提升组合理解和分类，未验证风格变换下的语义、检测框保持或跨域检测。",
+      "tldr": "论文提出语义差异对齐损失并构建 VarFamily-40K 数据集，通过对齐图文表征变化方向改善细粒度理解、分类和多模态任务表现。",
+      "tags": [
+        "vision-language",
+        "semantic-alignment",
+        "representation-learning"
+      ]
+    },
+    {
+      "id": "2611.32140",
+      "title": "LiteSTAR: Low-Rank Channel Modulation for Temporally Consistent CVD Video Compensation",
+      "abstract": "Color Vision Deficiency (CVD) affects a large population worldwide, yet practical recoloring must run continuously on-device. Frame-wise video recoloring produces color flickering, while existing methods rely on costly cross-frame alignment in pixel or feature space. We observe that color flickering correlates with variations in channel-wise responses, with color-sensitive variations concentrated in a low-rank subspace. Based on this observation, we propose Lightweight Spatio-Temporal Adaptive Recoloring (LiteSTAR), built around LiCaD, a plug-and-play Lightweight Channel-Adaptive Decoder. LiCaD performs temporal filtering in a low-rank state space with learned process and observation uncertainties. It then modulates feature channels to achieve temporal consistency without explicit spatial alignment. LiteSTAR further employs adaptive patch routing to improve color discrimination for CVD users while avoiding unnecessary over-enhancement. We also introduce EgoCVDSet, the first egocentric video benchmark for CVD recoloring. Extensive quantitative and qualitative experiments demonstrate that LiteSTAR achieves superior performance with only 0.05M parameters. LiCaD further demonstrates strong generalization across different tasks and network architectures. The code, models, and dataset will be released after review.",
+      "authors": [
+        "Peiyang Lin",
+        "Sichen Lin",
+        "Yipeng Liao",
+        "Liqun Lin",
+        "Xu Wang",
+        "Tiesong Zhao"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.7959,
+      "coarse_match": "风格增强与域随机化",
+      "interest_score": 0.7637,
+      "positive_score": 0.0321,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 3,
+      "matched_interests": [],
+      "reason": "低秩通道调制与自适应局部路由为低成本、时序稳定的颜色变换提供了方法参考。但目标是色觉缺陷辅助重着色，并未把颜色变化用于域随机化，也未评估检测语义或小目标保持。",
+      "tldr": "LiteSTAR 在低秩通道空间进行时序滤波并结合自适应局部路由，以仅 0.05M 参数实现高效稳定的视频重着色，并引入第一视角色觉缺陷视频基准。",
+      "tags": [
+        "video-recoloring",
+        "temporal-consistency",
+        "low-rank"
+      ]
+    },
+    {
+      "id": "2611.32696",
+      "title": "RestPose: Canonicalization for Open Object Pose Estimation",
+      "abstract": "In object pose estimation methods, predicted poses are expressed with respect to a canonical frame, defined by a reference model of that object. In learning-based methods, an arbitrarily chosen modeling convention defines this canonical frame, which is then used to generate the ground-truth pose-annotations for training. Object pose estimation methods are therefore bound to such arbitrary conventions, restricting generalization. In this work, we propose that such a canonical frame can instead be derived for any object, and present RestPose, an approach towards open object pose estimation that does not require reference models or canonical frame conventions during training. From a single input image, we generate an object mesh and canonicalize it through a geometric and physical analysis of the object, then use foundation model-based dense matching to estimate the pose. We choose category-level benchmarks for our experiments, which contain instances across various object categories and enable us to measure the effectiveness of our canonicalization. Across HouseCat6D, NOCS, and Omni6DPose datasets, we improve on the supervised state-of-the-art methods by 18.3 points in absolute metrics and 13.8 points in scale-agnostic metrics, without requiring task-specific training. Code will be published.",
+      "authors": [
+        "Sandeep Inuganti",
+        "Weihang Li",
+        "Benjamin Busam",
+        "Didier Stricker",
+        "Jason Rambach"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8432,
+      "coarse_match": "目标检测的单源域泛化",
+      "interest_score": 0.8138,
+      "positive_score": 0.0294,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 2,
+      "matched_interests": [],
+      "reason": "关注通过几何与物理分析建立物体规范坐标系，以提升开放物体姿态估计能力；其泛化问题主要源自姿态参考约定，而非检测器的视觉域偏移。",
+      "tldr": "RestPose 从单图生成物体网格并进行规范化，再结合基础模型稠密匹配估计姿态，无需任务特定训练即可在多个姿态基准上超过监督方法。",
+      "tags": [
+        "pose-estimation",
+        "canonicalization",
+        "geometry",
+        "training-free"
+      ]
+    },
+    {
+      "id": "2611.32424",
+      "title": "One Subspace Is Not Enough: LocalSubspaceAD for Training-Free Few-Shot Anomaly Detection",
+      "abstract": "Defect-free industrial samples can vary considerably in appearance, texture, and geometry. In few-shot anomaly detection, this variability has to be modeled from only a handful of images. SubspaceAD showed that a single principal subspace of foundation-model patch features is a strong training-free model of nominal appearance. However, a single subspace has to cover all of the nominal data's variability, so a deviation that is anomalous for one semantic region can be within the nominal variability of another. We propose LocalSubspaceAD, which extends SubspaceAD from a single subspace to a mixture of subspaces, assigning each group of patches with similar features its own subspace. The set of patch-features is partitioned using k-means, one subspace is fit per cluster, and each patch is scored by the minimum of re-projection residuals over all subspaces. The proposed method requires no training and no EM refinement. On MVTec AD, VisA and Real-IAD with 1, 2 and 4 shots, it improves over a single subspace (SubspaceAD) on both evaluated backbones: by 1.2 to 1.8 points image AUROC on DINOv2, and by 1.4 to 4.4 points in image AUROC, pixel AUPR and AUPRO on DINOv3. The gains are most pronounced on objects with heterogeneous nominal appearance, such as multi-instance categories and PCBs. Ablations show that the gains stem from a finer-grained model of variability through locally oriented subspaces, rather than from the subspace offsets (cluster means). We further show that the gains do not stem from added capacity alone: the local subspaces appear to capture the structure of coherent clusters in feature space, and the model does not merely act as a compressed memory bank.",
+      "authors": [
+        "Daniel Pr\\\"oll",
+        "Sebastian Hegenbart"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8284,
+      "coarse_match": "风格增强与域随机化",
+      "interest_score": 0.7988,
+      "positive_score": 0.0296,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 2,
+      "matched_interests": [],
+      "reason": "研究工业少样本异常检测，以局部子空间建模正常外观的异质性；虽然涉及外观变化和机制消融，但不是目标检测的域偏移或风格增强问题。",
+      "tldr": "LocalSubspaceAD 对基础模型局部特征聚类并拟合多个子空间，无需训练即可在三个工业异常检测基准上超过单子空间方法，消融表明收益主要来自更细粒度的变化建模。",
+      "tags": [
+        "anomaly-detection",
+        "few-shot",
+        "subspace",
+        "training-free"
+      ]
+    },
+    {
+      "id": "2611.31770",
+      "title": "ET: Efficient Transfer from Softmax to Hybrid Attention",
+      "abstract": "Converting pretrained softmax Transformers to efficient attention often causes substantial performance degradation, while recovery typically requires costly fine-tuning. We propose ET (Efficient Transfer), a framework for high-fidelity attention conversion with minimal optimization cost. ET combines exact local and shared-key softmax attention with a mean-anchored, scan-free global linear correction and adaptive gating, achieving linear complexity in sequence length. To preserve pretrained knowledge, ET freezes pretrained weights and calibrates only newly introduced parameters through alternating least squares on a small set of unlabeled samples, without gradient updates. On ImageNet-1K, ET achieves 79.64% and 81.55% top-1 accuracy on DeiT-S and DeiT-B, respectively, within 0.25 percentage points of their softmax teachers. At $768\\times768$, ET outperforms T$^5$ by 3.59 percentage points at comparable inference FLOPs, without gradient-based fine-tuning. On DiT-XL/2, ET achieves an FID-50K of 2.59 with only 250 LoRA updates. On Stable Diffusion 3.5 Medium, ET matches the teacher's GenEval score at 1K resolution with just 0.73 A100 GPU-hours of gradient-free conversion and a 1.39$\\times$ inference speedup.",
+      "authors": [
+        "Guangfu Guo",
+        "Xiaoqian Lu",
+        "Linsey Pang",
+        "Weiran Yao",
+        "Haolin Chen",
+        "Long Cheng",
+        "Kunpeng Liu"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8159,
+      "coarse_match": "跨域增强中的小目标细节保护",
+      "interest_score": 0.784,
+      "positive_score": 0.0319,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 2,
+      "matched_interests": [],
+      "reason": "重点是将预训练 Transformer 转换为低成本混合注意力并保持分类与生成性能，没有研究域偏移、检测泛化或保持标注的风格增强。",
+      "tldr": "ET 通过冻结预训练权重、无梯度校准新增参数实现高保真混合注意力转换，在分类和扩散生成中以较低转换成本获得加速。",
+      "tags": [
+        "efficient-attention",
+        "model-conversion",
+        "transformer"
+      ]
+    },
+    {
+      "id": "2611.32672",
+      "title": "Text Is Just Another Shot in Vision-Language Models: Simple Probes on Frozen Encoders Do It",
+      "abstract": "Few-shot adaptation of vision-language models has produced increasingly elaborate methods built on CLIP and on one shared principle: the zero-shot text classifier is the anchor, and labeled images only correct it. We argue that this principle reflects CLIP's visual features rather than a property of the task. We provide a simple Bayesian interpretation, in which a class name is worth exactly kappa = sigma^2 / tau^2 labeled images, the ratio between the visual spread of a class and the misalignment of its name. The Bayes classifier of this model counts text as kappa more samples. With modern frozen encoders, few-shot adaptation then reduces to a well-regularised convex probe. Specifically, we introduce TASP, a simple convex logistic regression on frozen features that incorporates class-name embeddings as weighted training examples and as a regularization prior. On the standard 11-dataset benchmark, TASP with frozen PE-Core-L features achieves 87.1% accuracy at 1 shot and 91.4% at 16 shots, outperforming state-of-the-art few-shot vision-language adaptation methods by 4.6 to 11.0 percentage points. While stronger representations explain much of this improvement, controlled comparisons on matched features show that existing frozen-encoder adaptation methods do not materially improve on this probe. We further find that the weight assigned to text matters more than how it is incorporated, and that combining self-supervised visual features with vision-language representations is most beneficial for weaker visual encoders. Together, these findings suggest that progress in few-shot vision-language adaptation depends more on representation quality and the appropriate use of text supervision than on increasingly complex adaptation mechanisms.",
+      "authors": [
+        "Reda Bensaid",
+        "Ismail Ben Ayed",
+        "Fran\\c{c}ois Leduc-Primeau",
+        "Vincent Gripon"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8142,
+      "coarse_match": "跨域增强中的小目标细节保护",
+      "interest_score": 0.7832,
+      "positive_score": 0.031,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 2,
+      "matched_interests": [],
+      "reason": "研究冻结视觉语言编码器的少样本分类适配，核心是文本先验与图像样本的权衡，没有涉及跨域目标检测、风格增强或未知域评测。",
+      "tldr": "TASP 将类别文本作为加权样本与正则先验融入凸逻辑回归，在标准少样本分类基准上优于复杂适配方法。",
+      "tags": [
+        "few-shot",
+        "vision-language",
+        "linear-probe"
+      ]
+    },
+    {
+      "id": "2611.33014",
+      "title": "Training Lightweight Gaze Models without Target Gaze Annotation: What Makes a Good Teacher?",
+      "abstract": "Model-generated labels offer a scalable route to training lightweight vision models, but what makes a model a good teacher, and can we tell before training a student? We study this in gaze target estimation, where interactive robots need models that are both accurate and efficient. In a controlled comparison of eleven supervision conditions, we vary only the source of gaze-point labels, keeping the student, training protocol and 361k training samples fixed, across three video datasets, two student sizes and three seeds; every student is evaluated against human annotation. Three findings emerge. First, imperfect model-generated labels can replace human annotation: Gaze-LLE, never trained on the target datasets' gaze annotation, trains students that match annotation-trained ones on ViT-Tiny and are significantly more accurate on ViT-Small (average distance error 0.187 vs 0.196), and the ViT-Tiny student runs 32$\\times$ faster than its teacher on a laptop CPU. Second, apparent competence can conceal unreliable supervision: given another person's face centre in the prompt, InternVL3 and Qwen3-VL return it on 93.4% and 81.1% of test samples, and a copy-the-coordinate baseline matches InternVL3's labels and students. Without that coordinate, both models fall far behind the specialist. Third, good teachers can be identified before training: validation label error ranks student test error (Spearman's $\\rho = 0.91$), and ten annotated clips single out the two specialist teachers in 95% of draws. These findings give practical principles for assessing supervision, exposing shortcuts and selecting teachers for lightweight models.",
+      "authors": [
+        "Scott J. Lewis",
+        "Di Fu"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8114,
+      "coarse_match": "目标检测的单源域泛化",
+      "interest_score": 0.7808,
+      "positive_score": 0.0306,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 2,
+      "matched_interests": [],
+      "reason": "关注注视点估计中的教师伪标签质量、学生精度与效率，虽有严格控制实验，但不研究外观域偏移或跨域目标检测。",
+      "tldr": "论文固定学生训练条件比较多种伪标签教师，发现专用教师可替代人工注视标注，且少量验证标注能有效预测教师质量。",
+      "tags": [
+        "gaze-estimation",
+        "pseudo-labels",
+        "knowledge-distillation"
+      ]
+    },
+    {
+      "id": "2611.33109",
+      "title": "RenGen: Generating Images with as Many Tokens as the Scene Needs",
+      "abstract": "We present RenGen, a latent diffusion model that generates simple scenes from a few tokens and busy scenes from many, saving time and compute on simple scenes without losing realism. Most latent generators represent every image as a fixed grid of patch tokens, so a simple image costs as much to generate as a complex one. Prior methods that vary the token count through content-adaptive tokenization lose image quality as the count shrinks. RenGen instead trades scene complexity, rather than image quality, for fewer tokens. It does so by generating in the latent space of a pretrained region encoder, where each token represents one region of the image, and a decoder renders these region tokens back into pixels. Unlike patch tokens, region tokens cover areas of varying shape and position, so each token must capture both what its region contains and where it lies on the image canvas. We encode this spatial extent by adding positional embeddings to the encoder features before pooling, and we generate it by anchoring each token to a single randomly sampled point, from which the generator infers the region's shape, size, and content. At sampling time, the number of anchor points sets the trade-off between scene complexity and compute. On ImageNet $256{\\times}256$, RenGen reaches a gFID of 1.34 with 88 tokens per image on average, the best among methods that vary their token count. It approaches the quality of RAEv2, a state-of-the-art patch-based model, at $2.5{\\times}$ lower latency, advancing the Pareto frontier of generation quality versus compute. RenGen's gFID stays flat across scene complexity while latency varies by $2.4{\\times}$ between simplest and busiest scenes, and its autoencoder reconstructs nearly as well as RAEv2 (rFID 0.32 vs. 0.30) with $2.9{\\times}$ fewer tokens.",
+      "authors": [
+        "Savya Khosla",
+        "Jay Mahajan",
+        "Akin Tuna Sakalli",
+        "Derek Hoiem",
+        "David Forsyth",
+        "Alex Schwing"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8099,
+      "coarse_match": "外观变换中的语义与边界框保持",
+      "interest_score": 0.7784,
+      "positive_score": 0.0315,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 2,
+      "matched_interests": [],
+      "reason": "区域 token 编码显式包含内容与空间范围，但目标是提升图像生成效率，不是对已有图像进行语义和边界框保持的外观变换，也没有跨域检测实验。",
+      "tldr": "RenGen 在区域编码器潜空间中生成图像，通过可变数量的区域 token 调节场景复杂度，以较低延迟实现高质量生成。",
+      "tags": [
+        "image-generation",
+        "region-tokens",
+        "latent-diffusion"
+      ]
+    },
+    {
+      "id": "2611.32423",
+      "title": "Factorized Context Attention: From Emulated to Native Grid Probing",
+      "abstract": "Models read a book, an hour of video, or an image in one forward pass. As the context grows, this pass slows down, loses accuracy, and stops at the context window. Sparse attention is efficient, but keeps the other two limitations. Grid probing, a recent training-free method, recovers the accuracy and extends the reach by asking a frozen model the same question about short local and strided spans of the input, but every question repeats the whole computation, since each span is encoded again. Our insight is that grid probing is emulated attention, an attention pattern reproduced from outside the model through prompts, since each probe only restricts which part of the input the question can see. We introduce Factorized Context Attention (FCA), a training-free block-sparse attention that runs the same pattern natively, as the attention of the model itself. FCA encodes the input once into a KV cache, reads all spans as masked sequences in one batched forward, and uses a stair position schedule to keep every span inside the trained position range. Across long video understanding, long-context text inference and image grounding, FCA matches the accuracy and the reach of grid probing at a fraction of its cost. It gains about 10 points over the single pass on long video and 9 to 14 points on long novels, finds needles in videos of over a thousand frames and in texts four times the length of the window, and answers a later question about the same input in as little as a tenth of the time of grid probing. Native attention thus keeps what emulated attention gains without its cost, all with existing frozen language and vision-language models.",
+      "authors": [
+        "Mohamed Eltahir",
+        "Manar Eyad",
+        "Yara Alzahrani",
+        "Fatimah Albesher",
+        "Duaa M. Tahir",
+        "Tanveer Hussain",
+        "Naeemullah Khan"
+      ],
+      "categories": [
+        "cs.CV",
+        "cs.CL"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8063,
+      "coarse_match": "目标检测的单源域泛化",
+      "interest_score": 0.776,
+      "positive_score": 0.0303,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 2,
+      "matched_interests": [],
+      "reason": "虽包含图像定位实验，但核心是长上下文注意力的计算复用与覆盖范围，不涉及域偏移、风格变换或检测器泛化。",
+      "tldr": "FCA 将外部多次局部探测转化为原生块稀疏注意力，通过复用 KV 缓存降低开销，同时保持长视频、长文本和图像定位任务的探测精度与覆盖范围。",
+      "tags": [
+        "sparse-attention",
+        "long-context",
+        "efficiency"
+      ]
+    },
+    {
+      "id": "2604.16678",
+      "title": "UniCon: Unified Framework for Efficient Contrastive Alignment via Kernels",
+      "abstract": "Contrastive objectives power state-of-the-art multimodal models, but their training remains slow, relying on long stochastic optimization. We propose a Unified Framework for Efficient Contrastive Alignment via Kernels (UniCon), which spans linear and nonlinear encoders as well as one-to-one and many-to-many alignments. At its core, UniCon introduces the contrastive similarity weight matrix $S(\\gamma)$, which enables closed-form global solutions that provably replace minibatch back-propagation with exact updates. Through the lens of reproducing kernel Hilbert spaces (RKHS), UniCon provides a kernelized perspective that unifies contrastive alignment and reveals its connection to spectral methods. To validate the theory, we conduct experiments on synthetic, unimodal, multimodal, and zero-shot tasks, demonstrating that UniCon achieves substantial efficiency gains while preserving generality and strong empirical performance.",
+      "authors": [
+        "Hangke Sui",
+        "Yuqing Wang",
+        "Minh N Do"
+      ],
+      "categories": [
+        "cs.LG",
+        "cs.CV"
+      ],
+      "announce_type": "cross",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8052,
+      "coarse_match": "外观变换中的语义与边界框保持",
+      "interest_score": 0.7735,
+      "positive_score": 0.0317,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 2,
+      "matched_interests": [],
+      "reason": "研究核方法下的高效对比对齐，虽包含视觉和零样本实验，但摘要未涉及视觉域偏移、检测任务或增强机制，交集主要限于通用表示学习。",
+      "tldr": "UniCon 以对比相似度权重矩阵和核空间分析统一多种对齐问题，用闭式全局更新替代小批量反向传播，并在多类任务上展示效率收益。",
+      "tags": [
+        "contrastive-learning",
+        "kernel-methods",
+        "efficient-training"
+      ]
+    },
+    {
+      "id": "2611.33009",
+      "title": "Train What You Run: Probabilistic Convolutions for Learning Token Compaction in State Space Models",
+      "abstract": "Visual token compaction reduces inference cost by passing only selected image patches or video tokens to later layers. In sequence models with local convolutions, each removal changes which tokens are neighbors. Learning which tokens to keep therefore requires a training signal that accounts for the new neighborhoods. We introduce ProbConv, which computes the exact expected convolution before activation at a kept position under independent keep decisions. The operator is differentiable in the keep probabilities. With binary decisions, ProbConv and step gating reproduce the compacted Mamba block. Across image, vision--language and video backbones, ProbConv is strongest under strong compaction: its advantage over matched training controls grows as more tokens are removed. In Cobra, it also outperforms adaptations of published vision--language pruning methods at matched inference budgets. ProbConv also improves over matched zero-mask training in video frame selection and speech frame dropping. Our code is available at: https://github.com/gmum/probconv",
+      "authors": [
+        "Piotr Kubaty (Faculty of Mathematics and Computer Science",
+        "Jagiellonian University",
+        "Krak\\'ow",
+        "Poland",
+        "Doctoral School of Exact and Natural Sciences",
+        "Jagiellonian University",
+        "Krak\\'ow",
+        "Poland)",
+        "Mikhail Saladkou (Faculty of Mathematics and Computer Science",
+        "Jagiellonian University",
+        "Krak\\'ow",
+        "Poland)",
+        "Jacek Tabor (Faculty of Mathematics and Computer Science",
+        "Jagiellonian University",
+        "Krak\\'ow",
+        "Poland",
+        "Centre for Credible Artificial Intelligence",
+        "Warsaw University of Technology",
+        "Poland)",
+        "{\\L}ukasz Struski (Faculty of Mathematics and Computer Science",
+        "Jagiellonian University",
+        "Krak\\'ow",
+        "Poland)"
+      ],
+      "categories": [
+        "cs.CV",
+        "cs.LG"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.804,
+      "coarse_match": "目标检测的单源域泛化",
+      "interest_score": 0.775,
+      "positive_score": 0.0291,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 2,
+      "matched_interests": [],
+      "reason": "关注视觉序列模型删减 token 后的邻域变化及训练一致性，可降低推理成本，但没有研究小目标细节保留、风格增强或跨域鲁棒性。",
+      "tldr": "ProbConv 对独立 token 保留决策下的卷积计算精确期望，使训练更贴近实际压缩推理，并在强压缩的图像、视觉语言及视频模型上取得更好表现。",
+      "tags": [
+        "token-compaction",
+        "state-space",
+        "efficient-inference"
+      ]
+    },
+    {
+      "id": "2611.32297",
+      "title": "MaskedVGGT: Masked Multi-View Transformers Are Scalable 3D Learners",
+      "abstract": "Multi-view feed-forward models show strong scalability, but their reliance on costly geometric annotations limits data scaling. Existing 3D self-supervised approaches reduce this reliance through cross-view completion (e.g., CroCo, MuM, Muskie) or novel-view synthesis (e.g., RayZer, E-RayZer), typically learning image representations and cross-view interactions jointly. We argue that learning single image representations from scratch is unnecessary for 3D pretraining methods, as doing so fails to benefit from the continuing advances in 2D foundation models (e.g., DINO, CLIP, frontier VLMs). We introduce MaskedVGGT, which freezes a strong pretrained 2D encoder and pretrains only an added, randomly initialized multi-view transformer, focusing on learning interactions across views. MaskedVGGT pretrains the multi-view transformer through masked self-distillation without annotations: a student predicts targets at masked locations based on complete anchor views and heavily masked remaining views, while an exponential-moving-average teacher provides prediction targets based on unmasked inputs. In experiments across model sizes up to 1B parameters, MaskedVGGT pretraining followed by fine-tuning outperforms single-stage supervised VGGT-$\\Omega$ training with the same training data, model architecture, and total number of optimization updates. MaskedVGGT also outperforms E-RayZer, CroCo, MuM, and Muskie, providing evidence for the effectiveness of building multi-view pretraining on strong 2D representations. Finally, extending pretraining with additional unlabeled videos further improves generalization, and the learned representations transfer to diverse downstream tasks. These results demonstrate an effective division of learning: reuse strong image representations from 2D pretraining and learn cross-view interactions from unlabeled multi-view data without relying on geometric annotations.",
+      "authors": [
+        "Zichen Zou",
+        "Xiaosong Jia",
+        "Wen-Ming Chen",
+        "Zuxuan Wu",
+        "Yu-Gang Jiang"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8029,
+      "coarse_match": "目标检测的单源域泛化",
+      "interest_score": 0.7719,
+      "positive_score": 0.031,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 2,
+      "matched_interests": [],
+      "reason": "研究冻结二维编码器后的多视图三维自监督预训练，重点是减少几何标注依赖和提升训练扩展性。摘要未讨论域偏移、检测器泛化或外观增强。",
+      "tldr": "MaskedVGGT 使用冻结二维编码器和掩码自蒸馏预训练多视图 Transformer，在相同训练预算下优于直接监督训练及多种三维预训练方法。",
+      "tags": [
+        "multi-view",
+        "self-supervised",
+        "3d-vision"
+      ]
+    },
+    {
+      "id": "2611.32728",
+      "title": "Diving Deeper into Dense Keypoint Localization in Object Pose Estimation",
+      "abstract": "6D pose estimation of rigid objects is a fundamental and challenging task in computer vision. Recent dense semantic keypoint-based methods employ binary encoding for efficient global keypoint localization, delivering strong performance in object pose estimation. Nevertheless, the discontinuous nature of binary encoding hinders effective training at high resolutions, while its inherent discrete and quantization errors lead to significant localization uncertainty. We propose GHLAPose, a global-to-local framework that synergizes hybrid Gray-binary (HGB) encoding with local-aware refinement (LAR). Specifically, HGB encoding first alleviates discontinuity to achieve accurate initial global keypoint localization. To further address intrinsic encoding errors, the LAR module estimates uncertainty and refines keypoint localization. This synergy enables a precise global-to-local strategy by aggregating global and local features. Extensive experiments on LM, LM-O, YCB-V, and TUD-L datasets demonstrate that GHLAPose surpasses state-of-the-art methods, particularly on fine-grained metrics. On LM-O, it outperforms the second-best method by 1.4% and 1.9% on ADD(-S) 0.02d and 0.05d respectively, and on YCB-V by 1% on ADD(-S) 0.1d. The code will be available at GHLAPose.",
+      "authors": [
+        "Jiahong Chen",
+        "Jinghao Wang",
+        "Yueneng Yang",
+        "Banglei Guan",
+        "Zi Wang",
+        "Dewen Hu",
+        "Qifeng Yu"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8012,
+      "coarse_match": "真实跨域检测评测与泛化机制分析",
+      "interest_score": 0.7719,
+      "positive_score": 0.0293,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 2,
+      "matched_interests": [],
+      "reason": "关注刚体六自由度姿态估计中的关键点编码误差与局部精修，与目标定位有宽泛联系。其细粒度定位改进不涉及外观增强、小目标保护或跨域鲁棒性。",
+      "tldr": "GHLAPose 结合混合格雷码—二进制编码和不确定性感知局部精修，在多个六自由度姿态估计基准上提升精细定位指标。",
+      "tags": [
+        "pose-estimation",
+        "keypoint-localization",
+        "uncertainty"
+      ]
+    },
+    {
+      "id": "2611.32562",
+      "title": "Sol$^{3}$: Accelerating Video Diffusion for Free via Hierarchical Sparse Attention Routing",
+      "abstract": "Sol-Attn (Sparsifying online attention) combines sparse exact computation with low-cost representative approximation to accelerate training-free inference in diffusion video models. However, intra-block attention can focus on only a few tokens. While preserving these key interactions exactly, the block-level decision incurs the cost of evaluating many low-response members. We propose Sol$^{3}$, a training-free hierarchical sparse attention method that further refines how exact computations are allocated. First, we introduce Gaussian-guided hierarchical routing, which determines the scope of exact computation step by step, from blocks to tokens, using statistical thresholds at each level. Only a subset of members within Mixed blocks that require refinement is selected for exact computation, while representative terms approximate the remaining members. We further design heterogeneous routing statistics that combine block-center correlations with variations in Key and Value within blocks to identify blocks that are difficult to approximate. Among these Mixed blocks, we uniformly compare raw token relevance to select members requiring exact computation. Experiments on video generation, audio-video co-generation, and world simulation tasks demonstrate that Sol$^{3}$ achieves 86% attention sparsity and delivers a $3.07\\times$ attention speedup while preserving quality. Our code is available at https://github.com/FofGofx/sol3.",
+      "authors": [
+        "Guoxin Fan",
+        "Weilun Feng",
+        "Chuanguang Yang",
+        "Mingqiang Wu",
+        "Xiaokun Liu",
+        "Jitao Lu",
+        "Zhulin An",
+        "Libo Huang",
+        "Boyu Diao",
+        "Di Gao",
+        "Yongjun Xu"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8002,
+      "coarse_match": "目标检测的单源域泛化",
+      "interest_score": 0.7705,
+      "positive_score": 0.0296,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 2,
+      "matched_interests": [],
+      "reason": "免训练稀疏注意力可降低视频生成推理成本，但并未用于风格增强、域随机化或跨域检测。与可复现算力需求只有间接联系，不能据此认定命中核心兴趣。",
+      "tldr": "Sol³ 通过分层稀疏注意力路由分配精确计算，在保持生成质量的同时达到 86% 注意力稀疏率和 3.07 倍注意力加速，并提供代码。",
+      "tags": [
+        "video-diffusion",
+        "sparse-attention",
+        "inference-acceleration"
+      ]
+    },
+    {
+      "id": "2611.32482",
+      "title": "COHERE4D: Training-Free Dense Surface Alignment for Coherent Metric 4D Human-Scene Reconstruction",
+      "abstract": "Human and scene foundation models offer complementary strengths for monocular 4D reconstruction: human models recover metric-scale body meshes but lack scene grounding, whereas scene models estimate globally consistent 3D geometry and camera motion without reliable metric scale. Crucially, both models reconstruct the same foreground human surface. Yet existing methods do not directly exploit this shared surface: lacking reliable foreground human geometry in scene reconstructions, earlier approaches either resort to sparse contact constraints or learn data-driven alignment modules that generalize poorly to out-of-distribution scenes. We present COHERE4D, a training-free framework that directly registers the human surfaces predicted by independently pretrained human and scene foundation models to reconstruct a coherent, metric 4D world. COHERE4D establishes dense, pixel-aligned 3D correspondences over the visible human surface and employs RANSAC with cross-frame consensus to suppress outliers from occlusion, background contamination, and depth noise. This formulation solves for two complementary geometric quantities: a sequence-level shared scale that calibrates scene geometry and camera motion to metric human size, and per-frame human translations that align camera-space human meshes with the scaled scene geometry to enforce spatial and temporal consistency. Across diverse backbones and benchmarks, COHERE4D substantially outperforms prior methods in human--scene alignment, metric scene and camera pose reconstruction, and global human motion estimation, adding only 4,ms/frame, enabling overall inference at up to 14 FPS.",
+      "authors": [
+        "Zhumei Wang",
+        "Shaofei Wang",
+        "Xiang An",
+        "Mingtao Pei",
+        "Siyuan Huang"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.7988,
+      "coarse_match": "真实跨域检测评测与泛化机制分析",
+      "interest_score": 0.7695,
+      "positive_score": 0.0293,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 2,
+      "matched_interests": [],
+      "reason": "论文以无需训练的几何配准规避学习式对齐模块在分布外场景中的泛化问题，但处理的是人体与场景的四维重建，不涉及目标检测或外观域偏移。",
+      "tldr": "COHERE4D 利用人体表面的密集三维对应和跨帧 RANSAC，对齐独立预训练的人体与场景模型，在多种骨干和基准上改善人体—场景对齐。",
+      "tags": [
+        "4d-reconstruction",
+        "surface-alignment",
+        "training-free"
+      ]
+    },
+    {
+      "id": "2611.32971",
+      "title": "Teaching Time Without Losing General Retrieval: Adapting Multimodal Embeddings for Time-Sensitive Video Retrieval",
+      "abstract": "In text-to-video retrieval, MLLM-based embedding models do well when the text describes the scene (general retrieval), but poorly when it describes actions and their direction (time-sensitive retrieval). TARA, a pioneering work, fine-tunes such a model on text triplets with temporal hard negatives; it improves time-sensitive retrieval but lowers general retrieval (mean R@1 over six benchmarks in our rerun on Qwen3-VL-Embedding-8B: 58.4->44.8), and its released model keeps general retrieval only when ensembled with Qwen3-VL-Embedding. Our goal is strong general and time-sensitive retrieval with one model and one vector per clip. Three findings lead to three simple components. Keep loss: general retrieval follows how far the output embeddings drift from the base model, not how far the weights move; we therefore keep them near the base model, which keeps most general retrieval even without general-domain data. Pair loss: the text embeddings of an action description and its reversed-direction version are well separated, but the video embeddings of a clip and its reversed copy are close; we therefore widen the gap between the video embeddings of each clip and its reversed copy, in the direction of the difference between their two text embeddings. Middle-layer LoRA: frames are combined in the middle layers, and temporal information peaks in or just after them; we therefore train LoRA only on these layers, which nearly matches training all weights on most time-sensitive benchmarks with 0.15% of the parameters and keeps general retrieval better. General R@1 stays at 58.4, while R@1 with each clip's reversed copy in the gallery rises from 55.5 to 63.2; the gains carry over to unseen benchmarks and InternVL2-8B-RA. The keep loss is also a remedy for the TARA recipe (general R@1: 44.8->57.8), and ensembling TARA with Ours gives the highest scores on RTime and unseen CiA among the compared models.",
+      "authors": [
+        "Toya Oyama",
+        "Rainer Lienhart",
+        "Shin'ichi Satoh"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.7967,
+      "coarse_match": "目标检测的单源域泛化",
+      "interest_score": 0.7659,
+      "positive_score": 0.0307,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 2,
+      "matched_interests": [],
+      "reason": "通过约束输出嵌入漂移保留原有通用能力，对模型适配中的能力保持有间接启发。但研究对象是时间敏感视频检索，没有检测、风格变换或视觉域泛化实验。",
+      "tldr": "该方法结合嵌入保持损失、正反向视频对比损失与中层 LoRA，旨在用单个模型和单个视频向量兼顾通用检索与时间敏感检索。",
+      "tags": [
+        "video-retrieval",
+        "temporal-learning",
+        "lora"
+      ]
+    },
+    {
+      "id": "2611.31755",
+      "title": "RVLM-X: Towards a Universal VLM Harness",
+      "abstract": "Harnesses for vision-language models (VLMs) have grown with the models' capabilities, notably for images far larger than those seen in training, where downscaling loses small details. Most of them wrap the VLM in a fixed procedure, such as a zoom tree, that decides in advance where it looks and how the evidence is combined. These procedures make up for the weaknesses of older models by keeping them on a task-specific path, but with frontier models that reliably plan and use tools, they can lower accuracy. We propose RVLM-X, a task-generalizable recursive VLM harness that runs unchanged across photographs, charts and maps. Following the recursive inference of Recursive Language Models, the VLM programmatically controls its own visual context in a code REPL that holds the full-resolution image and calls itself recursively on regions that it chooses. With a cost-efficient frontier model as the base of every method, RVLM-X is more accurate than a single call on all 7 public benchmarks and has the highest pooled accuracy. Because existing benchmarks mostly test whether a model finds one small detail, we also introduce MapGenBench, procedurally generated maps whose questions combine fine-detail perception with multi-step reasoning. There, RVLM-X answers 71.4% of held-out questions against 55.5% for the strongest baseline. Overall, our findings suggest that as VLMs plan and use tools more reliably, letting the model write its own visual search works better than fixing one in advance.",
+      "authors": [
+        "Aadi Palnitkar",
+        "Dmytro Kurdydyk",
+        "Xiaomin Lin"
+      ],
+      "categories": [
+        "cs.CV",
+        "cs.AI"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.7966,
+      "coarse_match": "真实跨域检测评测与泛化机制分析",
+      "interest_score": 0.7658,
+      "positive_score": 0.0308,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 2,
+      "matched_interests": [],
+      "reason": "保留全分辨率图像并递归查看局部区域，能够缓解缩放导致的小细节丢失，但这属于视觉语言模型的推理搜索，不是跨域增强中的小目标细节保护或目标检测。",
+      "tldr": "RVLM-X 让视觉语言模型通过代码自主递归查看图像区域，在七个公开基准上均优于单次调用，并在新地图推理基准上达到 71.4% 准确率。",
+      "tags": [
+        "vlm",
+        "visual-search",
+        "high-resolution"
+      ]
+    },
+    {
+      "id": "2611.32549",
+      "title": "MinPair: Measured Minimal Pairs for Fine-Grained Control in Text-to-Motion Generation",
+      "abstract": "Text-to-motion generation has made great progress in capturing what action to perform, yet it remains limited in controlling how that action is executed. For example, when only the height word of a kick request changes, none of the tested state-of-the-art methods reaches all three of knee, waist and head height. The other words of a caption usually imply an attribute such as height, so neither the training loss nor the standard metrics require a model to use the word that states it. A model has to use this word only when it alone separates two otherwise identical captions. We introduce MinPair, which creates such caption pairs from real motion clips. It starts from rule-based motion descriptors that measure the 3D body motion of each clip. From these descriptors a language model writes MinPair captions, timed body-part captions that say how each body part moves. The same descriptors show in which attributes two clips of the same action differ. A measured minimal pair joins the true caption of one clip with an altered copy in which only one attribute takes the value measured in the other clip. A contrastive pair loss then requires a diffusion denoiser to reconstruct the clip more accurately from its true caption than from the altered copy. Training needs no synthetic motion and inference stays unchanged. Control is tested on 22 target tasks and on caption edits that each change one attribute. MinPair captions alone help motions reach their targets and improve the standard metrics M2M, R@3 and FID, yet a model trained on them still ignores most single-word edits. The pair loss raises the share of followed template edits from 11% to 60%, while the standard metrics do not improve further. With body-part captions, MinPair reaches more targets than state-of-the-art methods that were trained on up to 99 times more motion data.",
+      "authors": [
+        "Lennart Schiweck",
+        "Crist\\'obal Curio"
+      ],
+      "categories": [
+        "cs.CV"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8097,
+      "coarse_match": "跨域增强中的小目标细节保护",
+      "interest_score": 0.7786,
+      "positive_score": 0.0311,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 1,
+      "matched_interests": [],
+      "reason": "研究文本控制人体动作生成中的细粒度属性遵循，最小文本对和对比损失不涉及视觉外观域偏移、目标框保持或跨域检测。",
+      "tldr": "MinPair 根据真实动作的可测属性构造最小差异描述对，并用对比损失提升文本到动作生成对高度等细粒度指令的响应能力。",
+      "tags": [
+        "text-to-motion",
+        "controllable-generation",
+        "contrastive-learning"
+      ]
+    },
+    {
+      "id": "2611.32538",
+      "title": "Advanced Synthetic Image Detection Using Hybrid Feature Extraction",
+      "abstract": "In the realm of generative AI, models such as GANs, MidJourney, DALL-E, and others have been continuously evolving to generate increasingly lifelike images. This rapid advancement has created an urgent need for robust methods to distinguish between real and AI-generated images. This paper proposes a novel approach for the detection of synthetic images by employing deep learning techniques for feature analysis. The proposed architecture classifies images by identifying variations that generative models struggle to replicate, particularly fine-grained textures and complex object features. Deformations in complexes are examined with the help of the CBAM architecture along with ResNet50. We have performed a selective patch-based analysis using Discrete Cosine Transform (DCT) scoring, extracting the regions with the most and least complexity for further processing with an SRM Module and ResNet50 module. Experimental results show that our approach achieves high accuracy in classifying real-world images from synthetic ones, contributing to the development of more reliable detection frameworks.",
+      "authors": [
+        "Ameya Uppina",
+        "S Navaneetha Krishnan",
+        "Nikhil N Iyer",
+        "Joe Dhanith P R"
+      ],
+      "categories": [
+        "cs.CV",
+        "cs.LG"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8022,
+      "coarse_match": "风格迁移与图像转换驱动的跨域检测",
+      "interest_score": 0.7737,
+      "positive_score": 0.0285,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 1,
+      "matched_interests": [],
+      "reason": "这里的检测是区分真实与生成图像的图像级分类，而非带边界框的目标检测。虽然使用细粒度纹理特征，但未涉及跨域泛化或增强中的目标细节保护。",
+      "tldr": "该方法结合 DCT 选块、SRM、ResNet50 和 CBAM 提取混合特征，报告了较高的真实与合成图像分类准确率。",
+      "tags": [
+        "synthetic-image",
+        "image-forensics",
+        "classification"
+      ]
+    },
+    {
+      "id": "2611.31836",
+      "title": "Gaze World Model",
+      "abstract": "Where a person looks indicates their focus of attention, and how their gaze shifts between targets reveals how that attention responds to a changing scene. Existing gaze target estimation methods largely operate frame by frame and do not model these shifts. Gaze shifts are often driven by dynamic changes in the scene, which is the kind of information world models are designed to encode. This relationship is subtle, however, since an event far across the frame may produce only a slight movement of the person's head or eyes. We therefore introduce the Gaze World Model (GWM), which co-trains latent scene prediction with person-conditioned gaze supervision on a frozen V-JEPA 2.1 encoder; in our ablations, the latent prediction objective improves both shift detection and gaze localization. Given a video clip and the person's head box, GWM estimates gaze locations and detects gaze shifts in the observed clip, and forecasts future gaze and shifts from predicted scene features. To train and evaluate these tasks, we augment VideoAttentionTarget and ChildPlay with event-level gaze-shift annotations. GWM achieves state-of-the-art shift detection on these benchmarks, about 10 points higher in four-class AP than the strongest baseline, while remaining comparable to the strongest image-based models in gaze target estimation, and outperforms the compared baselines on future gaze localization and shift forecasting.",
+      "authors": [
+        "Jiawen Zhang",
+        "Houze Yang",
+        "Xu Cao",
+        "Yifan Shen",
+        "Zhongyi Zhou",
+        "Steve Wong",
+        "Ismini Lourentzou",
+        "Inki Kim",
+        "James M. Rehg"
+      ],
+      "categories": [
+        "cs.CV",
+        "cs.AI"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8005,
+      "coarse_match": "跨域增强中的小目标细节保护",
+      "interest_score": 0.7703,
+      "positive_score": 0.0301,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 1,
+      "matched_interests": [],
+      "reason": "研究人物视线位置、视线转移及未来预测，输入头部框只是任务条件，并非目标检测研究。摘要没有跨域评测、域随机化或外观变换方法。",
+      "tldr": "GWM 在冻结的视频编码器上联合学习场景潜变量预测与视线监督，提升视线转移检测和未来视线预测表现。",
+      "tags": [
+        "gaze-estimation",
+        "world-model",
+        "video-understanding"
+      ]
+    },
+    {
+      "id": "2611.31774",
+      "title": "BODYBENCH: Evaluating Adversarial Image Defenses Against AI Nudification Inpainting",
+      "abstract": "Adversarial perturbation defenses protect images from unauthorized edits by adding imperceptible noise. Yet none of these methods have been evaluated against nudification, despite AI-generated non-consensual intimate imagery (AIG-NCII) being among the most documented harms of generative AI. Moreover, nudification edits are readily carried out through inpainting, the primary setting these protection methods are designed to defend against. We argue this is a problem-formulation failure since prior threat models do not correspond to nudification edits (also called attacks). The misalignment of existing approaches is structural, spanning mask shape, training and testing prompt distributions, and success criterion which causes existing evaluations to systematically overestimate protection effectiveness. We reformulate image protection against unauthorized editing around this documented harm. We introduce BODYBENCH, a benchmark of 648 fully synthetic clothed adult subjects, each paired with 11 mask variants spanning body, face, and context regions. We propose three harm-aligned metrics: sexualization, naturalness, and recognizability that jointly determine whether an inpainted output constitutes a successful nudification attack. Auditing four recent protection methods (PhotoGuard, DiffusionGuard, AdvPaint, DiffVax) on BODYBENCH, we find that protection succeeds in only one configuration of one method, and only under exact mask alignment between defender and attacker---a condition no real defender can guarantee and one that we show is easily always bypassed. We also show that standard evaluation metrics such as peak signal-to-noise ratio (PSNR) are essentially uncorrelated with nudification protection. BODYBENCH makes this misalignment measurable and provides a foundation for defenses grounded in documented harm.",
+      "authors": [
+        "Li Qiwei",
+        "Salma Abdel Magid",
+        "Olga Russakovsky",
+        "Eric Gilbert",
+        "Sarita Schoenebeck"
+      ],
+      "categories": [
+        "cs.CV",
+        "cs.CR"
+      ],
+      "announce_type": "new",
+      "announced": "2026-11-25T05:00:00Z",
+      "coarse_score": 0.8004,
+      "coarse_match": "真实跨域检测评测与泛化机制分析",
+      "interest_score": 0.7706,
+      "positive_score": 0.0297,
+      "negative_score": null,
+      "zotero_score": null,
+      "forced": false,
+      "llm_score": 1,
+      "matched_interests": [],
+      "reason": "评估对抗扰动能否防止未经授权的敏感图像编辑，重点是威胁模型与防护失效。其鲁棒性属于生成式编辑安全，不是视觉域泛化或跨域目标检测。",
+      "tldr": "BODYBENCH 构建合成成年人物图像及多种掩码的防护评测，发现四种现有方法在贴近实际危害的设置下几乎都无法有效阻止攻击。",
+      "tags": [
+        "image-protection",
+        "adversarial-defense",
+        "safety-benchmark"
+      ]
+    }
+  ],
+  "stats": {
+    "fetched": 501,
+    "duplicates": 0,
+    "excluded": 0,
+    "candidates": 50,
+    "selected": 7,
+    "failed_batches": 0,
+    "degraded": false,
+    "llm_calls": 7,
+    "prompt_tokens": 32315,
+    "completion_tokens": 11207,
+    "duration_seconds": 296.9,
+    "feedback": {
+      "up": 0,
+      "down": 0,
+      "like": 0,
+      "dislike": 0,
+      "implicit": 1,
+      "positive": 1,
+      "negative": 0,
+      "muted": 0,
+      "synced": 0,
+      "sync_error": null
+    },
+    "zotero": null,
+    "deep_read": 1,
+    "deep_read_notes": []
+  },
+  "issue_number": 16,
+  "issue_url": "https://github.com/Chengnacheng/Paper-gleaner/issues/16",
+  "comment_ids": {
+    "2611.31515": 7159501523,
+    "2611.32542": 7159502085,
+    "2611.32500": 7159502660,
+    "2611.31604": 7159503234,
+    "2611.32846": 7159503792,
+    "2611.32474": 7159504378,
+    "2611.32632": 7159504981
+  },
+  "notifications": {},
+  "deep_reads": [
+    "2611.31515"
+  ]
+}
